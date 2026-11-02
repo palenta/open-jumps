@@ -9,3 +9,4 @@ export * from './rules/heats.js';
 export * from './rules/assists.js';
 export * from './rules/judging.js';
 export * from './rules/pranks.js';
+export * from './rules/emotes.js';

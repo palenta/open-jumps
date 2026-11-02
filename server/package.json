@@ -1,0 +1,11 @@
+{
+  "name": "@open-jumps/server",
+  "private": true,
+  "version": "0.0.1",
+  "type": "module",
+  "main": "./src/index.ts",
+  "dependencies": {
+    "@open-jumps/shared": "0.0.1",
+    "colyseus": "^0.18.10"
+  }
+}
