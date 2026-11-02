@@ -1,0 +1,22 @@
+{
+  "name": "open-jumps",
+  "private": true,
+  "version": "0.0.1",
+  "description": "Open Jumps — browser show-jumping game for the Open Sports Barcelona kids",
+  "type": "module",
+  "workspaces": [
+    "shared"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc -p shared/tsconfig.json --noEmit"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3",
+    "vitest": "^3.2.7"
+  }
+}

@@ -1,0 +1,298 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>Open Jumps — tap probe</title>
+<style>
+  :root { --sand:#e9d8b4; --sky:#cfe8ff; --ink:#1f1a14; --ok:#2e9e4f; --warn:#d98f00; --bad:#c43c2b; --rail:#b5452c; }
+  * { box-sizing:border-box; margin:0; padding:0; -webkit-tap-highlight-color:transparent; }
+  html, body { height:100%; overflow:hidden; background:var(--sky); color:var(--ink); font:16px/1.3 -apple-system, "Segoe UI", Roboto, sans-serif; touch-action:none; -webkit-user-select:none; user-select:none; }
+  #arena { position:fixed; inset:0; width:100%; height:100%; display:block; }
+  .panel { position:fixed; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:flex-start; gap:14px; padding:6vh 24px 40px; background:rgba(207,232,255,.96); text-align:center; overflow-y:auto; -webkit-overflow-scrolling:touch; touch-action:pan-y; }
+  .panel h1 { font-size:26px; }
+  .panel p { max-width:520px; font-size:17px; }
+  .btn { font-size:20px; padding:14px 28px; border:0; border-radius:14px; background:var(--ink); color:#fff; min-width:160px; min-height:56px; }
+  .btn.alt { background:#fff; color:var(--ink); border:2px solid var(--ink); }
+  .row { display:flex; gap:12px; flex-wrap:wrap; justify-content:center; }
+  input[type=text] { font-size:18px; padding:10px 12px; border:2px solid var(--ink); border-radius:10px; width:220px; text-align:center; }
+  #hud { position:fixed; top:env(safe-area-inset-top, 8px); left:12px; right:12px; display:flex; justify-content:space-between; font-weight:600; font-size:15px; pointer-events:none; }
+  #verdict { position:fixed; left:0; right:0; top:28%; text-align:center; font-size:34px; font-weight:800; pointer-events:none; opacity:0; transition:opacity .15s; text-shadow:0 2px 0 #fff; }
+  #verdict.show { opacity:1; }
+  textarea { width:100%; max-width:560px; height:150px; font:13px ui-monospace, Menlo, monospace; padding:8px; }
+  table { border-collapse:collapse; font-size:15px; }
+  td, th { border:1px solid #8a7b60; padding:6px 10px; }
+  .hidden { display:none !important; }
+  #rotate { display:none; }
+  @media (orientation: portrait) { #rotate { display:flex; } }
+</style>
+</head>
+<body>
+<canvas id="arena"></canvas>
+<div id="hud"><span id="counter">—</span><span id="window">—</span></div>
+<div id="verdict"></div>
+
+<div id="rotate" class="panel" style="z-index:50"><h1>Turn your phone sideways 🔄</h1><p>The probe runs in landscape.</p></div>
+
+<div id="intro" class="panel">
+  <h1>Open Jumps — tap probe</h1>
+  <p style="font-size:14px;opacity:.75">This is a 2-minute timing test, not the game. The real game is 3D with real sounds.</p>
+  <p>A pony canters towards a fence. <b>Tap anywhere</b> at the moment of take-off: when the pony reaches the coloured zone on the ground. 21 tries, three zone sizes. You will hear the hoofbeats.</p>
+  <div class="row">
+    <input id="name" type="text" placeholder="Your name" autocomplete="off">
+    <input id="device" type="text" placeholder="iPhone or iPad?" autocomplete="off">
+  </div>
+  <button id="start" class="btn">Start</button>
+  <button id="last" class="btn alt hidden">Show last results</button>
+  <p style="font-size:13px;opacity:.7">Nothing is sent anywhere. Results are shown at the end to copy.</p>
+</div>
+
+<div id="done" class="panel hidden">
+  <h1>Done! 🏆</h1>
+  <div id="summary"></div>
+  <p><b>Was it fair?</b></p>
+  <div class="row"><button class="btn alt" data-q="fair" data-v="yes">Sí</button><button class="btn alt" data-q="fair" data-v="no">No</button></div>
+  <p><b>Did it feel like a real take-off (batida)?</b></p>
+  <div class="row"><button class="btn alt" data-q="jump" data-v="yes">Sí</button><button class="btn alt" data-q="jump" data-v="no">No</button></div>
+  <p style="font-size:14px">Copy this and send it to papá:</p>
+  <textarea id="out" readonly></textarea>
+  <div class="row"><button id="copy" class="btn">Copy results</button><button id="again" class="btn alt">Again</button></div>
+</div>
+
+<script>
+(() => {
+  // --- configuration -------------------------------------------------------
+  const WINDOWS = [
+    { id: 'narrow', cleanMs: 100, perfectMs: 40 },
+    { id: 'base',   cleanMs: 175, perfectMs: 65 },   // BASE_WINDOW in the plan
+    { id: 'wide',   cleanMs: 250, perfectMs: 90 },
+  ];
+  const TRIES_PER_WINDOW = 7;
+  const NO_TAP_MS = 400;          // beyond this: "no tap"
+  const SPEED_PX_PER_S = 320;     // pony speed on screen
+  const STRIDE_MS = 520;          // hoofbeat period (≈ canter stride)
+
+  // --- state ---------------------------------------------------------------
+  const canvas = document.getElementById('arena');
+  const ctx = canvas.getContext('2d');
+  const hudCounter = document.getElementById('counter');
+  const hudWindow = document.getElementById('window');
+  const verdictEl = document.getElementById('verdict');
+  let dpr = 1, W = 0, H = 0;
+  let plan = [];          // sequence of window ids
+  let results = [];       // {window, offsetMs|null, tier}
+  let trial = null;       // current trial
+  let audio = null;
+  let running = false;
+
+  function resize() {
+    dpr = Math.min(window.devicePixelRatio || 1, 2);
+    W = window.innerWidth; H = window.innerHeight;
+    canvas.width = W * dpr; canvas.height = H * dpr;
+    canvas.style.width = W + 'px'; canvas.style.height = H + 'px';
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
+  window.addEventListener('resize', resize); resize();
+
+  function shuffled(arr) {
+    const a = arr.slice();
+    for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; }
+    return a;
+  }
+
+  // --- audio: hoofbeats ----------------------------------------------------
+  function ensureAudio() {
+    if (audio) return;
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return;
+    audio = new AC();
+  }
+  function hoofbeat(strong) {
+    if (!audio) return;
+    const t = audio.currentTime;
+    const o = audio.createOscillator(); const g = audio.createGain();
+    o.type = 'triangle'; o.frequency.setValueAtTime(strong ? 140 : 110, t);
+    g.gain.setValueAtTime(strong ? 0.35 : 0.2, t); g.gain.exponentialRampToValueAtTime(0.001, t + 0.09);
+    o.connect(g).connect(audio.destination); o.start(t); o.stop(t + 0.1);
+  }
+  function thud() {
+    if (!audio) return;
+    const t = audio.currentTime;
+    const o = audio.createOscillator(); const g = audio.createGain();
+    o.type = 'square'; o.frequency.setValueAtTime(70, t);
+    g.gain.setValueAtTime(0.4, t); g.gain.exponentialRampToValueAtTime(0.001, t + 0.25);
+    o.connect(g).connect(audio.destination); o.start(t); o.stop(t + 0.3);
+  }
+
+  // --- trial ---------------------------------------------------------------
+  function startTrial(index) {
+    const win = WINDOWS.find(w => w.id === plan[index]);
+    const approachMs = 2600 + Math.random() * 1800;          // 2.6–4.4 s, so the moment cannot be memorised
+    const fenceX = W * 0.78;
+    const t0 = performance.now() + approachMs;                 // ideal take-off moment
+    trial = { index, win, t0, fenceX, approachMs, startAt: performance.now(), tapped: false, lastBeat: -1, offsetMs: null, tier: null, decided: false };
+    hudCounter.textContent = `Try ${index + 1} / ${plan.length}`;
+    hudWindow.textContent = `zone ${win.id}`;
+    verdictEl.className = '';
+  }
+
+  function tier(offsetMs, win) {
+    if (offsetMs === null || Math.abs(offsetMs) > NO_TAP_MS) return 'sin batida';
+    const a = Math.abs(offsetMs);
+    if (a <= win.perfectMs) return 'perfecta';
+    if (a <= win.cleanMs) return 'limpia';
+    return offsetMs < 0 ? 'batida larga' : 'batida corta';
+  }
+
+  function decide(offsetMs) {
+    if (!trial || trial.decided) return;
+    trial.decided = true;
+    trial.offsetMs = offsetMs;
+    trial.tier = tier(offsetMs, trial.win);
+    results.push({ window: trial.win.id, cleanMs: trial.win.cleanMs, perfectMs: trial.win.perfectMs, offsetMs: offsetMs === null ? null : Math.round(offsetMs), tier: trial.tier });
+    const colors = { perfecta: 'var(--ok)', limpia: 'var(--ok)', 'batida corta': 'var(--warn)', 'batida larga': 'var(--warn)', 'sin batida': 'var(--bad)' };
+    verdictEl.textContent = trial.tier + (offsetMs === null ? '' : ` (${offsetMs > 0 ? '+' : ''}${Math.round(offsetMs)} ms)`);
+    verdictEl.style.color = colors[trial.tier];
+    verdictEl.className = 'show';
+    if (trial.tier === 'batida corta' || trial.tier === 'batida larga' || trial.tier === 'sin batida') thud();
+    setTimeout(() => {
+      if (trial.index + 1 < plan.length) startTrial(trial.index + 1); else finish();
+    }, 1300);
+  }
+
+  function onTap(ev) {
+    if (!running) return;
+    ev.preventDefault();
+    const now = performance.now();
+    if (!trial || trial.decided) return;
+    if (now < trial.t0 - 1500) return;                 // far too early: ignore, the zone is not even near
+    decide(now - trial.t0);
+  }
+  window.addEventListener('pointerdown', onTap, { passive: false });
+  // Block scrolling only while a trial is running (taps must not move the page); panels scroll normally.
+  window.addEventListener('touchmove', (e) => { if (running) e.preventDefault(); }, { passive: false });
+
+  // --- drawing -------------------------------------------------------------
+  function draw(now) {
+    requestAnimationFrame(draw);
+    if (!running || !trial) return;
+    const t = trial;
+    const groundY = H * 0.68;
+    const pxPerMs = SPEED_PX_PER_S / 1000;
+    const ponyX = t.fenceX - (t.t0 - now) * pxPerMs;    // reaches fenceX at t0
+
+    // hoofbeats on a fixed rhythm until take-off
+    if (!t.decided) {
+      const beat = Math.floor((now - t.startAt) / STRIDE_MS);
+      if (beat !== t.lastBeat) { t.lastBeat = beat; hoofbeat(beat % 2 === 0); }
+    }
+    // no tap at all → decide "sin batida" 400 ms after t0
+    if (!t.decided && now > t.t0 + NO_TAP_MS) decide(null);
+
+    ctx.clearRect(0, 0, W, H);
+    // sky & sand
+    ctx.fillStyle = '#cfe8ff'; ctx.fillRect(0, 0, W, groundY);
+    ctx.fillStyle = '#e9d8b4'; ctx.fillRect(0, groundY, W, H - groundY);
+    // stride markers on the ground (one per stride length)
+    const strideLen = SPEED_PX_PER_S * STRIDE_MS / 1000;
+    ctx.fillStyle = 'rgba(80,60,30,.25)';
+    for (let x = t.fenceX - strideLen; x > -strideLen; x -= strideLen) ctx.fillRect(x - 2, groundY, 4, 10);
+    // take-off zones on the ground: clean (amber) and perfect (green), widths from the window in ms
+    const cleanPx = t.win.cleanMs * pxPerMs, perfPx = t.win.perfectMs * pxPerMs;
+    ctx.fillStyle = 'rgba(217,143,0,.45)'; ctx.fillRect(t.fenceX - cleanPx, groundY - 6, cleanPx * 2, 14);
+    ctx.fillStyle = 'rgba(46,158,79,.7)'; ctx.fillRect(t.fenceX - perfPx, groundY - 6, perfPx * 2, 14);
+    // fence
+    ctx.fillStyle = '#b5452c';
+    ctx.fillRect(t.fenceX + 70, groundY - 110, 10, 110);
+    ctx.fillRect(t.fenceX + 70 - 40, groundY - 60, 90, 8);
+    ctx.fillRect(t.fenceX + 70 - 40, groundY - 95, 90, 8);
+    ctx.fillStyle = '#6a3d2a'; ctx.fillRect(t.fenceX + 70 - 50, groundY - 110, 10, 110); ctx.fillRect(t.fenceX + 70 + 40, groundY - 110, 10, 110);
+    // pony (a simple shape + emoji so it reads on any device)
+    const bob = Math.sin((now - t.startAt) / STRIDE_MS * Math.PI * 2) * 6;
+    let py = groundY - 30 + bob;
+    if (t.decided && t.tier !== 'sin batida' && t.offsetMs !== null) {
+      const dt = now - (t.t0 + t.offsetMs);                 // airborne arc after take-off
+      if (dt > 0 && dt < 700) py -= Math.sin(dt / 700 * Math.PI) * 120;
+    }
+    ctx.font = '64px serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'bottom';
+    ctx.save(); ctx.translate(Math.min(ponyX, W + 40), py + 10); ctx.scale(-1, 1);   // the emoji faces left; the pony runs right
+    ctx.fillText('🐎', 0, 0); ctx.restore();
+    // caption
+    ctx.fillStyle = '#1f1a14'; ctx.font = '600 15px -apple-system, sans-serif'; ctx.textAlign = 'left';
+    ctx.fillText('Tap when the pony reaches the green/amber zone', 12, H - 14);
+  }
+  requestAnimationFrame(draw);
+
+  // --- finish & export -----------------------------------------------------
+  const answers = {};
+  function finish() {
+    running = false;
+    trial = null;
+    document.getElementById('done').classList.remove('hidden');
+    const rows = WINDOWS.map(w => {
+      const r = results.filter(x => x.window === w.id);
+      const n = r.length || 1;
+      const clean = r.filter(x => x.tier === 'perfecta' || x.tier === 'limpia').length;
+      const perfect = r.filter(x => x.tier === 'perfecta').length;
+      const noTap = r.filter(x => x.tier === 'sin batida').length;
+      const offs = r.filter(x => x.offsetMs !== null).map(x => x.offsetMs);
+      const mean = offs.length ? Math.round(offs.reduce((a, b) => a + b, 0) / offs.length) : 0;
+      const meanAbs = offs.length ? Math.round(offs.reduce((a, b) => a + Math.abs(b), 0) / offs.length) : 0;
+      return `<tr><td>${w.id} ±${w.cleanMs}</td><td>${Math.round(clean / n * 100)}%</td><td>${Math.round(perfect / n * 100)}%</td><td>${noTap}</td><td>${mean > 0 ? '+' : ''}${mean} / ${meanAbs} ms</td></tr>`;
+    }).join('');
+    document.getElementById('summary').innerHTML = `<table><tr><th>zone</th><th>clean</th><th>perfect</th><th>no tap</th><th>bias / |err|</th></tr>${rows}</table>`;
+    updateOut();
+  }
+  function updateOut() {
+    const payload = {
+      probe: 'tap-window-v1', when: new Date().toISOString(),
+      name: document.getElementById('name').value.trim(), device: document.getElementById('device').value.trim(),
+      ua: navigator.userAgent, screen: [W, H, dpr],
+      answers, results,
+    };
+    document.getElementById('out').value = JSON.stringify(payload);
+    try { localStorage.setItem('open-jumps-tap-probe', document.getElementById('out').value); } catch (e) {}
+  }
+  document.querySelectorAll('[data-q]').forEach(b => b.addEventListener('click', () => {
+    answers[b.dataset.q] = b.dataset.v;
+    b.parentElement.querySelectorAll('button').forEach(x => x.style.opacity = x === b ? '1' : '.4');
+    updateOut();
+  }));
+  document.getElementById('copy').addEventListener('click', async () => {
+    const out = document.getElementById('out');
+    out.select();
+    try { await navigator.clipboard.writeText(out.value); document.getElementById('copy').textContent = 'Copied ✓'; } catch (e) { document.execCommand('copy'); }
+  });
+  document.getElementById('again').addEventListener('click', () => location.reload());
+
+  // Results survive a reload on this device: offer them again without redoing the 21 tries.
+  try {
+    const saved = localStorage.getItem('open-jumps-tap-probe');
+    if (saved) {
+      const lastBtn = document.getElementById('last');
+      lastBtn.classList.remove('hidden');
+      lastBtn.addEventListener('click', () => {
+        const payload = JSON.parse(saved);
+        results = payload.results || [];
+        Object.assign(answers, payload.answers || {});
+        document.getElementById('name').value = payload.name || '';
+        document.getElementById('device').value = payload.device || '';
+        document.getElementById('intro').classList.add('hidden');
+        finish();
+      });
+    }
+  } catch (e) {}
+
+  document.getElementById('start').addEventListener('click', () => {
+    ensureAudio();
+    plan = shuffled(WINDOWS.flatMap(w => Array(TRIES_PER_WINDOW).fill(w.id)));
+    results = [];
+    document.getElementById('intro').classList.add('hidden');
+    running = true;
+    startTrial(0);
+  });
+})();
+</script>
+</body>
+</html>
