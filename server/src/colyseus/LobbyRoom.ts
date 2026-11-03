@@ -55,7 +55,11 @@ export interface LobbyRoomDeps {
  *   room sends that connection — and only it — 'clock-offset' { offsetMs }: the active ClockSync.offsetMs, client −
  *   server (a clientTime c is judged at c − offsetMs). The client translates with it from then on, so the lit tap
  *   zone and the instant hint read the judge's own translation and never one biased by the one-way delay (audit K1
- *   r3 #5). An unchanged value is not sent again.
+ *   r3 #5). An unchanged value is not sent again on the same connection — and only there: what went out on a
+ *   connection that broke may never have arrived, so a new connection of the session (a token reconnection that
+ *   takes the seat back: a new Client object) is sent the active offset at once, whatever an earlier connection was
+ *   told, and again whenever the active value it was told moves (audit K1 r4 #2). The active measurement stays in
+ *   force until the new connection's series is ready.
  * - Phases in the state: 'lobby' → 'walk' → 'riding' → 'results' (per heat) → 'done'; 'class-phase' is also sent
  *   as a message { phase, heatIndex, startedAt, endsAt } with the server's clock: when the phase began and when
  *   its timer ends (walk, results; null for riding and done), so a client paces the course walk from the server's
@@ -299,9 +303,11 @@ export class LobbyRoom extends Room<{ state: LobbyState }> {
   /**
    * Clocks per session: `active` is the last READY measurement (the one rider commands use), `pending` the series
    * being measured now (at every join and every course walk, plan 2.3); a series replaces the active one only once
-   * it is ready, so unanswered series never discard a usable offset.
+   * it is ready, so unanswered series never discard a usable offset. `announced` is the last offset sent as
+   * 'clock-offset' and the connection (Client object) it went to: a value counts as told only to that connection
+   * (audit K1 r4 #2).
    */
-  private readonly clocks = new Map<string, { active: ClockSync | null; pending: ClockSync | null; announced: number | null }>();
+  private readonly clocks = new Map<string, { active: ClockSync | null; pending: ClockSync | null; announced: { to: Client; offsetMs: number } | null }>();
   private readonly timers = new Set<NodeJS.Timeout>();
   private flow: ClassFlow | null = null;
   private classNumber = 0;
@@ -491,7 +497,9 @@ export class LobbyRoom extends Room<{ state: LobbyState }> {
       this.accountBySession.set(client.sessionId, accountId);
       if (this.heatRiders.has(accountId)) this.flow?.riderReconnected(accountId, this.serverNow());
       // Messages go to the NEW Client object: Colyseus marks the previous one RECONNECTED and drops whatever is sent
-      // to it, so the clock series used to vanish here (found with audit K1 r2 #1).
+      // to it, so the clock series used to vanish here (found with audit K1 r2 #1). The offset in force is told to the
+      // new connection at once: the last 'clock-offset' may have been lost with the old one (audit K1 r4 #2).
+      this.announceClock(back);
       this.startClockSync(back);
       this.syncApproach(back, accountId);
     } catch {
@@ -548,7 +556,8 @@ export class LobbyRoom extends Room<{ state: LobbyState }> {
 
   /**
    * A pong feeds the series being measured; once that series is ready it becomes the active measurement. Whenever the
-   * active offset is new or has moved, the client is told it ('clock-offset', audit K1 r3 #5).
+   * active offset is new or has moved — or this connection has not been told it yet — the client is told it
+   * ('clock-offset', audit K1 r3 #5, r4 #2).
    */
   private clockPong(client: Client, serverSent: number, clientTime: number): void {
     const clocks = this.clocks.get(client.sessionId);
@@ -560,11 +569,20 @@ export class LobbyRoom extends Room<{ state: LobbyState }> {
       clocks.active = clocks.pending;
       clocks.pending = null;
     }
-    const offsetMs = clocks.active?.offsetMs ?? null;
-    if (offsetMs !== null && offsetMs !== clocks.announced) {
-      clocks.announced = offsetMs;
-      client.send('clock-offset', { offsetMs });
-    }
+    this.announceClock(client);
+  }
+
+  /**
+   * Tell `client` the session's active offset ('clock-offset') unless this very connection was already told this very
+   * value (audit K1 r3 #5, r4 #2). Nothing while no measurement is ready.
+   */
+  private announceClock(client: Client): void {
+    const clocks = this.clocks.get(client.sessionId);
+    const offsetMs = clocks?.active?.offsetMs ?? null;
+    if (!clocks || offsetMs === null) return;
+    if (clocks.announced !== null && clocks.announced.to === client && clocks.announced.offsetMs === offsetMs) return;
+    clocks.announced = { to: client, offsetMs };
+    client.send('clock-offset', { offsetMs });
   }
 
   // ---------------------------------------------------------------------------------------------------------

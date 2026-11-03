@@ -30,6 +30,8 @@ export interface AppOptions {
   /** Test hooks for the class inside the live room (short course, short phases); production uses the defaults. */
   course?: (code: string, classNumber: number) => CourseSpec;
   timing?: { walkMs: number; resultsMs: number };
+  /** Test hook: the live room's server clock (LobbyRoom deps.clock); production uses Date.now. */
+  clock?: () => number;
 }
 
 export interface App {
@@ -148,7 +150,7 @@ async function serveStatic(staticRoot: string, req: IncomingMessage, res: Server
  * - `/api/*` → createApi(options.api) (its own Origin guard for state-changing requests);
  * - the Colyseus Server with WebSocketTransport({ server, beforeUpgrade: createUpgradeGuard(allowedOrigins) })
  *   attached to the same http server, LOBBY_ROOM_NAME defined as LobbyRoom and LobbyRoom.configure(...) called
- *   with the services from options (sessions, accounts, rooms, allowedOrigins, results, course, timing); the
+ *   with the services from options (sessions, accounts, rooms, allowedOrigins, results, course, timing, clock); the
  *   client-callable matchmaking methods restricted to joinById and reconnect (rooms are created by the API only);
  * - everything else → static files from staticDir (GET/HEAD only; `/` → index.html; paths are resolved inside
  *   staticDir and anything that escapes it, or does not exist, answers 404); with staticDir null → 404.
@@ -225,6 +227,7 @@ export function createApp(options: AppOptions): App {
     results: options.results,
     ...(options.course !== undefined ? { course: options.course } : {}),
     ...(options.timing !== undefined ? { timing: options.timing } : {}),
+    ...(options.clock !== undefined ? { clock: options.clock } : {}),
   };
   LobbyRoom.configure(deps);
   gameServer.define(LOBBY_ROOM_NAME, LobbyRoom).on('dispose', (room: { roomId: string }) => {

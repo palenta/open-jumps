@@ -36,6 +36,8 @@ export interface BootOptions {
   course?: CourseSpec;
   timing?: { walkMs: number; resultsMs: number };
   staticDir?: string;
+  /** The live room's server clock (default Date.now): a test that must know every offset exactly freezes it. */
+  clock?: () => number;
 }
 
 /** The whole server on a random port: API, static files (optional) and the live rooms. */
@@ -54,6 +56,7 @@ export async function bootApp(options: BootOptions = {}): Promise<LiveApp> {
     staticDir: options.staticDir ?? null,
     course: () => course,
     timing: options.timing ?? TIMING,
+    ...(options.clock !== undefined ? { clock: options.clock } : {}),
   });
   const port = await app.listen(0, '127.0.0.1');
   return {
