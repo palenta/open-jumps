@@ -78,6 +78,40 @@ async function register(page: Page, riderName: string, ponyName: string): Promis
 }
 
 /**
+ * Records every text the HUD caption shows from now on. The caption is shared by all horses of the heat, so another
+ * horse's event (the host's self-jumps, refusals, elimination) can replace a rider's caption before a check reads it;
+ * the record keeps them all.
+ */
+async function recordCaptions(page: Page): Promise<void> {
+  await page.evaluate(() => {
+    const seen: string[] = [];
+    (window as unknown as { __captions: string[] }).__captions = seen;
+    const read = (): void => {
+      const text = document.querySelector('[data-hud-caption]')?.textContent ?? '';
+      if (text !== '' && seen[seen.length - 1] !== text) seen.push(text);
+    };
+    new MutationObserver(read).observe(document.body, { subtree: true, childList: true, characterData: true });
+    read();
+    // Every touch on the tap control, against the take-off moment it showed (both in performance.now() time).
+    const touches: { lateMs: number | null; armed: string | null }[] = [];
+    (window as unknown as { __touches: typeof touches }).__touches = touches;
+    document.addEventListener(
+      'pointerdown',
+      (event) => {
+        const tap = document.querySelector('[data-control="tap"]');
+        const at = Number.parseFloat(tap?.getAttribute('data-takeoff-at') ?? 'NaN');
+        touches.push({ lateMs: Number.isFinite(at) ? Math.round(event.timeStamp - at) : null, armed: tap?.getAttribute('data-armed') ?? null });
+      },
+      { capture: true },
+    );
+  });
+}
+
+async function captionsShown(page: Page, pattern: RegExp): Promise<boolean> {
+  return page.evaluate((source) => (window as unknown as { __captions: string[] }).__captions.some((text) => new RegExp(source).test(text)), pattern.source);
+}
+
+/**
  * One real take-off from the displayed tap control, timed by the page itself: when the horse enters the approach
  * zone the tap control is armed and carries data-takeoff-at (the device time of the take-off moment, in
  * performance.now() ms); the finger lands 20 ms after it, inside the perfect/clean tiers. The server's own word
@@ -97,9 +131,22 @@ async function tapAtFence(page: Page, fence: number, ponyName: string): Promise<
   const now = await page.evaluate(() => performance.now());
   await page.waitForTimeout(Math.max(0, takeoffAt + 20 - now));
   await page.touchscreen.tap(box.x + box.width / 2, box.y + box.height / 2); // a finger, not a mouse: the project has touch
-  await expect(page.locator('[data-hud-caption]')).toHaveText(new RegExp(`^${ponyName}: (perfecta|cero faltas) at fence ${String(fence)}`), { timeout: 10_000 });
+  const judged = new RegExp(`^${ponyName}: (perfecta|cero faltas) at fence ${String(fence)}`);
+  try {
+    await expect.poll(() => captionsShown(page, judged), { timeout: 10_000 }).toBe(true);
+  } catch (error) {
+    const shown = await page.evaluate(() => (window as unknown as { __captions: string[] }).__captions);
+    const touches = await page.evaluate(() => (window as unknown as { __touches: unknown[] }).__touches);
+    throw new Error(`no caption ${judged.source}; captions shown since the round began: ${JSON.stringify(shown)}; touches: ${JSON.stringify(touches)}`, { cause: error });
+  }
   await expect(page.locator('[data-hud-fence]')).toHaveText(`Fence ${String(fence + 1)}`, { timeout: 10_000 });
-  await expect(page.locator('[data-hud-faults]')).toHaveText('0 faults');
+  try {
+    await expect(page.locator('[data-hud-faults]')).toHaveText('0 faults');
+  } catch (error) {
+    const shown = await page.evaluate(() => (window as unknown as { __captions: string[] }).__captions);
+    const touches = await page.evaluate(() => (window as unknown as { __touches: unknown[] }).__touches);
+    throw new Error(`faults after fence ${String(fence)}; captions: ${JSON.stringify(shown)}; touches: ${JSON.stringify(touches)}`, { cause: error });
+  }
   await expect(tap).not.toHaveAttribute('data-armed', 'true');
 }
 
@@ -171,6 +218,7 @@ test('create → code → ring → admit → heights → walk → round with a c
     await expect(friend.locator('[data-list="fences"] li').first()).toContainText('Fence 1');
     await expectScreen(host, 'round', 30_000);
     await expectScreen(friend, 'round', 30_000);
+    await recordCaptions(friend);
 
     // The friend's first two fences: a real tap each, timed by the page, judged clean by the server; the host
     // never taps and her horse jumps by itself (a rail each time).
@@ -183,7 +231,12 @@ test('create → code → ring → admit → heights → walk → round with a c
     // them by account id — the two accepted jumps above are the proof of the input, not the places.
     await expectScreen(host, 'results', 150_000);
     await expectScreen(friend, 'results', 150_000);
-    await expect(host.locator('[data-list="results"]')).toContainText(`${HOST_NAME} on Dakota`);
+    // First the heat that just ended (the results phase, CLASS_TIMING.resultsMs = 15 s even after the last heat),
+    // built from the state the server published at that boundary; the class table replaces it after 'done'.
+    await expect(host.locator('[data-list="heat"] > li[data-id]')).toHaveCount(2);
+    await expect(host.locator('[data-list="heat"]')).toContainText(`${HOST_NAME} on Dakota`);
+    await expect(host.locator('[data-list="heat"]')).toContainText(`${FRIEND_NAME} on Luna`);
+    await expect(host.locator('[data-list="results"]')).toContainText(`${HOST_NAME} on Dakota`, { timeout: 30_000 });
     await expect(host.locator('[data-list="results"]')).toContainText(`${FRIEND_NAME} on Luna`);
     await expect(friend.locator('[data-list="results"] tr[data-id]')).toHaveCount(2);
 
