@@ -201,9 +201,12 @@ interface RoundModules {
  *   clock — not finite, 0 or negative, later than clock.now() — is another base or none, and clock.now() at handling is
  *   used instead. A correct timeStamp is never replaced, however old (audit K1 r4 #1): a tap, or a direction press
  *   that is a turn at its moment, already more than INPUT.maxPressAgeMs (= PACKET.maxAgeMs, 300 ms: the judge's
- *   'too-old' limit, which no packet handled that late can meet) before clock.now() when it is handled sends nothing,
- *   spends nothing and shows no hint — the tap zone stays lit and the turn window open, so the next timely press goes
- *   out; the gear and a line shift carry no time and go out whatever the age. [data-hud-fence], [data-hud-faults], [data-hud-time], [data-hud-gear], [data-hud-caption],
+ *   'too-old' limit) before clock.now() when it is handled sends nothing, spends nothing and shows no hint — the tap
+ *   zone stays lit and the turn window open, so the next timely press goes out. Its packet would reach the server no
+ *   earlier than it is handled, so the judge could accept it only if an error of the clock measurement in its favour
+ *   outweighed the whole transit; sending it would only spend the attempt or the turn. A press exactly
+ *   INPUT.maxPressAgeMs old when handled still goes out. The gear and a line shift carry no time and go out whatever
+ *   the age. [data-hud-fence], [data-hud-faults], [data-hud-time], [data-hud-gear], [data-hud-caption],
  *   [data-badge] (placeholder art) from hudModel; [data-rotate] is shown (hidden attribute removed) when
  *   needsRotation(rect.width, rect.height), and while it is shown every pointerdown on the arena is ignored (the
  *   hidden zones take no input). While the own horse's approach is open (from the 'approach' event
