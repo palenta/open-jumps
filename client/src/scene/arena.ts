@@ -1,7 +1,10 @@
 // The arena in Three.js — PLACEHOLDER ART (plan 1.14 says the real horses, fences and manège come from the Blender
 // pipeline after probe №3): primitives with flat colours, deliberately provisional in look, so that nobody mistakes
 // this for the game's art. What is real here: the track geometry from the course (track.ts), the fence positions,
-// the horses moving along the track from the server's positions, the chase camera and the course-walk fly-over.
+// the horses moving along the track from the server's positions, the chase camera and the course-walk fly-over —
+// and the housekeeping: every object this file builds is freed (geometry, materials, textures) when a new course
+// replaces it, when the room is left and when the scene is disposed (audit K1 r1 #9), so "again" after "again"
+// on a phone does not pile up GPU buffers.
 import * as THREE from 'three';
 import type { CourseSpec } from '@open-jumps/shared';
 import type { SceneFrame, SceneLike } from '../app/game.js';
@@ -89,6 +92,27 @@ function numberTexture(number: number): THREE.Texture {
   return texture;
 }
 
+/**
+ * Free the GPU resources of an object tree: every geometry, every material (shared ones once) and the textures
+ * those materials hold. Removing an object from the scene alone keeps all of that alive in the renderer.
+ */
+function disposeTree(root: THREE.Object3D): void {
+  const geometries = new Set<THREE.BufferGeometry>();
+  const materials = new Set<THREE.Material>();
+  root.traverse((object) => {
+    if (!(object instanceof THREE.Mesh)) return;
+    geometries.add(object.geometry);
+    for (const material of Array.isArray(object.material) ? object.material : [object.material]) materials.add(material);
+  });
+  const textures = new Set<THREE.Texture>();
+  for (const material of materials) {
+    for (const value of Object.values(material)) if (value instanceof THREE.Texture) textures.add(value);
+  }
+  for (const geometry of geometries) geometry.dispose();
+  for (const material of materials) material.dispose();
+  for (const texture of textures) texture.dispose();
+}
+
 /** A flat ribbon along the track: sampled every metre, drawn as a line strip and small ground tiles. */
 function makeTrackRibbon(track: Track): THREE.Group {
   const group = new THREE.Group();
@@ -153,6 +177,22 @@ export function createArenaScene(): SceneLike {
     }
   }
 
+  /** Every horse leaves the scene, its resources freed, its label removed. */
+  function clearHorses(): void {
+    for (const horse of horses.values()) {
+      disposeTree(horse.group);
+      scene.remove(horse.group);
+      horse.label.remove();
+    }
+    horses.clear();
+  }
+
+  /** The course's objects leave the scene, their resources freed. */
+  function clearCourse(): void {
+    for (const child of [...courseGroup.children]) disposeTree(child);
+    courseGroup.clear();
+  }
+
   function horseFor(id: string, isOwn: boolean, index: number): { group: THREE.Group; label: HTMLElement } {
     let horse = horses.get(id);
     if (!horse) {
@@ -200,12 +240,8 @@ export function createArenaScene(): SceneLike {
 
     setCourse(next: CourseSpec | null): void {
       course = next;
-      courseGroup.clear();
-      for (const horse of horses.values()) {
-        scene.remove(horse.group);
-        horse.label.remove();
-      }
-      horses.clear();
+      clearCourse();
+      clearHorses();
       if (!next) {
         track = null;
         return;
@@ -222,7 +258,7 @@ export function createArenaScene(): SceneLike {
     },
 
     render(frame: SceneFrame): void {
-      if (!renderer) return;
+      // The scene graph follows the frame even without WebGL (a test browser): only the drawing needs the renderer.
       sizeToContainer();
       const seen = new Set<string>();
       frame.riders.forEach((entry, index) => {
@@ -250,16 +286,18 @@ export function createArenaScene(): SceneLike {
         camera.position.set(middle.x - 40, 30, middle.z + 50);
         camera.lookAt(middle.x, 0, middle.z);
       }
+      if (!renderer) return;
       renderer.render(scene, camera);
       for (const [id, horse] of horses) if (seen.has(id)) placeLabel(horse.label, horse.group);
     },
 
     dispose(): void {
-      for (const horse of horses.values()) {
-        scene.remove(horse.group);
-        horse.label.remove();
-      }
-      horses.clear();
+      clearHorses();
+      clearCourse();
+      disposeTree(ground);
+      scene.remove(ground);
+      track = null;
+      course = null;
       renderer?.dispose();
       renderer?.domElement.remove();
       labels?.remove();
