@@ -15,7 +15,7 @@ import {
   type HeightClass,
   type Locale,
 } from '@open-jumps/shared';
-import { hudModel, resultsModel, riderOnPony, type HudNames } from '../hud/viewModel.js';
+import { heatResultsModel, hudModel, resultsModel, riderOnPony, type HudNames } from '../hud/viewModel.js';
 import { InputController } from '../input/controller.js';
 import { hitTest, layoutFor, needsRotation, type Control, type Layout } from '../input/layout.js';
 import { LobbyFlow, type LobbyPhase } from '../lobby/lobbyFlow.js';
@@ -174,8 +174,12 @@ interface RoundModules {
  *   The round-side modules (InstantHint, InputController, RemoteInterpolator, RoundClockEstimate) are created
  *   anew at every class-course message, so a new class starts clean (a new round key, an empty buffer: the other
  *   horses are drawn from the new class's samples only, never from the last class's positions).
- * - results: [data-list="results"] > [data-class] tables with tr[data-id] rows (resultsModel), [data-action="again"]
- *   (host only; sends start-class) and [data-action="leave"].
+ * - results: once the class table arrived, [data-list="results"] > [data-class] tables with tr[data-id] rows
+ *   (resultsModel), [data-action="again"] (host only; sends start-class) and [data-action="leave"]. Before it —
+ *   between the heats ('results') and in the moment before the table lands ('done', also for a late joiner who gets
+ *   class-course first) — the heat that just ended as [data-heat-done] + [data-list="heat"] > li[data-id]
+ *   (heatResultsModel of the state's riders), [data-waiting] with the next step, and [data-action="leave"]
+ *   (audit K1 r1 #2: never an empty page).
  * - Lifecycle: document 'visibilitychange' (visible) and window 'pageshow' → session.resume(); window 'resize' →
  *   resize(). destroy() removes the listeners, leaves the session and disposes the scene.
  * - Captions use the participants' names from the state; the pony's gender is known only for the own rider
@@ -735,7 +739,8 @@ export function createGame(deps: GameDeps): Game {
   }
 
   function renderResults(): string {
-    if (!me || !table) return '';
+    if (!me) return '';
+    if (!table) return renderHeatResults(me.id);
     const classes = resultsModel(table, names(), locale, me.id);
     return `<section class="screen results">
       <div data-list="results">${classes
@@ -746,6 +751,29 @@ export function createGame(deps: GameDeps): Game {
         )
         .join('')}</div>
       ${isHost() ? `<button type="button" data-action="again" class="primary">${escapeHtml(t('lobby.again'))}</button>` : ''}
+      <button type="button" data-action="leave" class="link">${escapeHtml(t('lobby.leave'))}</button>
+      ${localeButtons()}
+    </section>`;
+  }
+
+  /**
+   * Between the heats, and until the class table lands: the heat that just ended (the state still carries its riders)
+   * and what comes next — never an empty page (audit K1 r1 #2). The host's "again" waits for the table: the server
+   * refuses start-class while the class runs.
+   */
+  function renderHeatResults(ownId: string): string {
+    const current = state();
+    const rows = current ? heatResultsModel(current, names(), locale, ownId) : [];
+    const heat = rows.length === 0
+      ? ''
+      : `<h1 data-heat-done>${escapeHtml(t('results.heatDone', { heat: (current?.heatIndex ?? 0) + 1 }))}</h1>
+      <ul data-list="heat">${rows
+        .map((row) => `<li data-id="${escapeHtml(row.accountId)}" ${row.isOwn ? 'class="own"' : ''}>${escapeHtml(row.name)} · ${escapeHtml(row.faultsText)}${row.statusText ? ` · ${escapeHtml(row.statusText)}` : ''}</li>`)
+        .join('')}</ul>`;
+    const waiting = current?.phase === 'done' ? t('results.classDoneWaiting') : t('results.nextHeat');
+    return `<section class="screen results">
+      ${heat}
+      <p data-waiting class="status">${escapeHtml(waiting)}</p>
       <button type="button" data-action="leave" class="link">${escapeHtml(t('lobby.leave'))}</button>
       ${localeButtons()}
     </section>`;

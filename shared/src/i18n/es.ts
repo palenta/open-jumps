@@ -109,6 +109,9 @@ export const es: Record<keyof typeof en, string> = {
   'hud.phase.done': 'Prueba terminada',
 
   'results.title': 'Resultados — {cm} cm',
+  'results.heatDone': '{term:manga} {heat} terminada',
+  'results.nextHeat': 'La siguiente {term:manga} empieza enseguida…',
+  'results.classDoneWaiting': 'Prueba terminada — ya llegan los resultados…',
   'results.place': 'Puesto',
   'results.rider': 'Jinete',
   'results.faults': 'Puntos',

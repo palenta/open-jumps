@@ -1479,6 +1479,109 @@ describe('the results screen', () => {
   });
 });
 
+describe('between the heats and at the end (audit K1 r1 #2)', () => {
+  /** Heat 1 is over: Maria finished with a rail, Ana was eliminated; the state still carries the heat's riders. */
+  const heatOver = (over: Partial<LobbyStateSnapshot> = {}): LobbyStateSnapshot =>
+    snapshot({
+      phase: 'results',
+      heatIndex: 0,
+      roundClockMs: 61_000,
+      riders: {
+        host: rider('host', { nextFence: 2, positionM: 50, faults: 4, status: 'finished', lastLabel: 'batida_corta' }),
+        ana: rider('ana', { faults: 8, status: 'eliminated', lastLabel: 'rehuse' }),
+      },
+      ...over,
+    });
+
+  it('riding → results with no class-table yet: the results screen shows the heat that just ended (every rider, faults, how it went) and a leave button, never an empty page', async () => {
+    const h = await inRound();
+    h.session().emitState(heatOver());
+    await settle();
+    expect(h.root.dataset.screen).toBe('results');
+    expect(h.root.innerHTML.trim()).not.toBe('');
+    const heat = q(h.root, '[data-list="heat"]');
+    expect(text(heat.querySelector('[data-id="host"]'))).toContain('Maria on Dakota');
+    expect(text(heat.querySelector('[data-id="host"]'))).toContain('4');
+    expect(text(heat.querySelector('[data-id="host"]'))).toContain('Finished');
+    expect(text(heat.querySelector('[data-id="ana"]'))).toContain('Ana on Luna');
+    expect(text(heat.querySelector('[data-id="ana"]'))).toContain('eliminada');
+    expect(text(h.root.querySelector('[data-heat-done]'))).toBe('manga 1 finished');
+    expect(text(h.root.querySelector('[data-waiting]'))).toBe('The next manga starts in a moment…');
+    expect(h.root.querySelector('[data-list="results"]')).toBeNull(); // no class table yet
+    expect(h.root.querySelector('[data-action="leave"]')).not.toBeNull();
+    expect(h.root.querySelector('[data-action="again"]')).toBeNull(); // the class is still running
+  });
+
+  it('results → the next heat\'s walk: the walk screen comes back for heat 2', async () => {
+    const h = await inRound();
+    h.session().emitState(heatOver());
+    await settle();
+    h.session().emitState(snapshot({ phase: 'walk', heatIndex: 1 }));
+    await settle();
+    expect(h.root.dataset.screen).toBe('walk');
+    expect(h.root.querySelector('[data-list="fences"]')).not.toBeNull();
+  });
+
+  it('results → done before the class-table arrives: the waiting text says the class is finished; the table then replaces it', async () => {
+    const h = await inRound();
+    h.session().emitState(heatOver());
+    await settle();
+    h.session().emitState(heatOver({ phase: 'done' }));
+    await settle();
+    expect(h.root.dataset.screen).toBe('results');
+    expect(text(h.root.querySelector('[data-waiting]'))).toBe('Class finished — the results are coming…');
+    expect(h.root.querySelector('[data-list="heat"]')).not.toBeNull();
+    h.session().emitMessage({ type: 'class-table', table });
+    await settle();
+    expect(h.root.querySelector('[data-waiting]')).toBeNull();
+    expect(h.root.querySelector('[data-list="heat"]')).toBeNull();
+    expect(h.root.querySelector('[data-list="results"] [data-class="70"] tr[data-id="ana"]')).not.toBeNull();
+    expect(h.root.querySelector('[data-action="again"]')).not.toBeNull();
+  });
+
+  it('the leave button of the intermediate results works: session.leave() → home', async () => {
+    const h = await inRound();
+    h.session().emitState(heatOver());
+    await settle();
+    click(h.root, '[data-action="leave"]');
+    await settle();
+    expect(h.session().leaves).toBe(1);
+    expect(h.root.dataset.screen).toBe('home');
+  });
+
+  it('a late joiner into a finished class: the state says done, then class-course arrives, then class-table — the screen is never empty and ends on the table', async () => {
+    const h = await boot({
+      script: { knock: [ok<JoinDecision>({ status: 'admitted' })], roomStatus: [ok<RoomStatusReply>({ status: 'admitted', roomId: 'r1' })] },
+      stateOnConnect: guestSnapshot({ phase: 'done', heatIndex: 0, riders: {} }),
+    });
+    await ring(h, 'ABCDEF');
+    expect(h.root.dataset.screen).toBe('results');
+    expect(h.root.innerHTML.trim()).not.toBe('');
+    expect(text(h.root.querySelector('[data-waiting]'))).toBe('Class finished — the results are coming…');
+    h.session().emitMessage({ type: 'class-course', course, classNumber: 1 });
+    await settle();
+    expect(h.root.dataset.screen).toBe('results');
+    expect(h.root.querySelector('[data-waiting]')).not.toBeNull();
+    expect(h.scene.courses.at(-1)).toEqual(course);
+    h.session().emitMessage({ type: 'class-table', table });
+    await settle();
+    expect(h.root.dataset.screen).toBe('results');
+    expect(h.root.querySelector('[data-waiting]')).toBeNull();
+    expect(h.root.querySelector('[data-list="results"] tr[data-id="host"]')).not.toBeNull();
+    expect(h.root.querySelector('[data-action="again"]')).toBeNull(); // a guest
+  });
+
+  it('the intermediate results are in the locale: Spanish', async () => {
+    const h = await inRound();
+    h.session().emitState(heatOver());
+    await settle();
+    click(h.root, '[data-action="locale"][data-locale="es"]');
+    expect(text(h.root.querySelector('[data-heat-done]'))).toBe('manga 1 terminada');
+    expect(text(h.root.querySelector('[data-waiting]'))).toBe('La siguiente manga empieza enseguida…');
+    expect(text(h.root.querySelector('[data-list="heat"] [data-id="host"]'))).toContain('Maria con Dakota');
+  });
+});
+
 // ---- lifecycle ------------------------------------------------------------------------------------------------
 
 describe('the tab lifecycle', () => {

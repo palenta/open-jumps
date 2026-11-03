@@ -3,7 +3,7 @@
 // functions of the room snapshot and the locale, so the DOM layer only prints what it gets.
 import { MESSAGES } from '@open-jumps/shared';
 import { describe, expect, it } from 'vitest';
-import { hudModel, resultsModel, riderOnPony, type HudInput, type HudNames } from '../src/hud/viewModel.js';
+import { heatResultsModel, hudModel, resultsModel, riderOnPony, type HudInput, type HudNames } from '../src/hud/viewModel.js';
 import type { ClassTableWire, LobbyStateSnapshot, RiderView } from '../src/net/types.js';
 
 const names: HudNames = {
@@ -219,5 +219,31 @@ describe('resultsModel', () => {
 
   it('an empty table has no classes', () => {
     expect(resultsModel({}, names, 'en', 'host')).toEqual([]);
+  });
+});
+
+describe('heatResultsModel (audit K1 r1 #2: what the results screen shows between the heats)', () => {
+  it('lists the riders of the heat that just ended: finishers first by faults, the eliminated after, each with the name, faults and how it went', () => {
+    const state = snapshot({
+      phase: 'results',
+      riders: {
+        host: rider('host', { faults: 4, status: 'finished', lastLabel: 'batida_corta' }),
+        ana: rider('ana', { faults: 0, status: 'finished', lastLabel: 'cero_faltas' }),
+        bea: rider('bea', { faults: 8, status: 'eliminated', lastLabel: 'rehuse' }),
+      },
+    });
+    const rows = heatResultsModel(state, names, 'en', 'host');
+    expect(rows.map((row) => [row.accountId, row.name, row.faults, row.faultsText, row.statusText, row.isOwn])).toEqual([
+      ['ana', 'Ana on Luna', 0, '0 faults', 'Finished', false],
+      ['host', 'Maria on Dakota', 4, '4 faults', 'Finished', true],
+      ['bea', 'Bea on Nube', 8, '8 faults', 'eliminada', false],
+    ]);
+  });
+
+  it('a rider still marked riding (a snapshot between patches) has no status text; an empty heat is an empty list; Spanish reads Spanish', () => {
+    expect(heatResultsModel(snapshot({ phase: 'results', riders: { ana: rider('ana') } }), names, 'en', 'host')[0]?.statusText).toBe('');
+    expect(heatResultsModel(snapshot({ phase: 'done', riders: {} }), names, 'en', 'host')).toEqual([]);
+    const es = heatResultsModel(snapshot({ phase: 'results', riders: { host: rider('host', { faults: 4, status: 'finished' }) } }), names, 'es', 'host');
+    expect(es[0]).toMatchObject({ name: 'Maria con Dakota', faultsText: '4 puntos', statusText: 'Meta' });
   });
 });

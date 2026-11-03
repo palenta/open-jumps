@@ -62,6 +62,18 @@ export interface ResultsClass {
   rows: ResultsRow[];
 }
 
+/** One rider of the heat that just ended, as the results screen lists them before the class table exists. */
+export interface HeatResultRow {
+  accountId: string;
+  name: string;
+  faults: number;
+  /** "4 faults" / "4 puntos". */
+  faultsText: string;
+  /** "Finished" / "eliminada"; '' while the snapshot still says riding. */
+  statusText: string;
+  isOwn: boolean;
+}
+
 export interface HudInput {
   state: LobbyStateSnapshot;
   ownId: string;
@@ -128,6 +140,27 @@ export function hudModel(input: HudInput): HudModel {
     riders,
     badge: translate(locale, 'app.placeholderArt'),
   };
+}
+
+/**
+ * The heat that just ended, from the riders the state still carries during 'results' (the engine is gone, the
+ * class table comes only with 'done'): finishers first by faults, then the eliminated by faults, ties by name.
+ * There are no times in the state, so none are shown; the class table brings them.
+ */
+export function heatResultsModel(state: LobbyStateSnapshot, names: HudNames, locale: Locale, ownId: string): HeatResultRow[] {
+  const rank = (status: string): number => (status === 'finished' ? 0 : status === 'eliminated' ? 1 : 2);
+  return Object.values(state.riders)
+    .map((rider) => ({
+      accountId: rider.accountId,
+      name: riderOnPony(locale, names, rider.accountId),
+      faults: rider.faults,
+      faultsText: translate(locale, 'hud.faults', { faults: rider.faults }),
+      statusText: rider.status === 'finished' ? translate(locale, 'hud.finished') : rider.status === 'eliminated' ? translate(locale, 'hud.eliminated') : '',
+      isOwn: rider.accountId === ownId,
+      rank: rank(rider.status),
+    }))
+    .sort((a, b) => a.rank - b.rank || a.faults - b.faults || a.name.localeCompare(b.name))
+    .map(({ rank: _rank, ...row }) => row);
 }
 
 /** Tables in ascending height class; rows in the server's order (placed first, then eliminated). */

@@ -108,6 +108,9 @@ export const en = {
   'hud.phase.done': 'Class finished',
 
   'results.title': 'Results — {cm} cm',
+  'results.heatDone': '{term:manga} {heat} finished',
+  'results.nextHeat': 'The next {term:manga} starts in a moment…',
+  'results.classDoneWaiting': 'Class finished — the results are coming…',
   'results.place': 'Place',
   'results.rider': 'Rider',
   'results.faults': 'Faults',
