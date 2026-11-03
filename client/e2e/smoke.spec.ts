@@ -4,6 +4,13 @@
 // is judged clean by the server (no faults, the next fence comes up — a missing pointerdown handler or a lost
 // command would give the self-jump's rail instead), the results table with both riders, "again" into the next
 // course walk; on the way the tab lifecycle event leaves the screen alone and the Spanish locale shows a Spanish fence.
+// K1.1 (plan step 11, matrix row 21): the walk shows the map of the route — eight fence markers, the turn arrows —
+// and no control; the friend reads the way of her first turn off the map, and before that turn (the one before
+// fence 3) she waits for both direction buttons to light up (data-window="open") and touches the button of that
+// way with a real finger in the open window; the judge's answer is a turn without a stop (giro cerrado or giro
+// abierto), never "¡Recto!" or "recorrido equivocado". The walk lasts 20 s now, so the round screen is awaited with
+// room to spare. The code stage proves once, by sabotage and without a commit, that this route fails when the turn is
+// not sent and when the button is covered by an element outside the arena.
 // Run with `npx playwright test -c client/e2e/playwright.config.ts` after `npx playwright install chromium`
 // (a browser download — done together with the owner). Not part of `npm test`.
 import { expect, test, type Browser, type BrowserContext, type Locator, type Page } from '@playwright/test';
@@ -151,6 +158,51 @@ async function tapAtFence(page: Page, fence: number, ponyName: string): Promise<
 }
 
 /**
+ * The course walk of K1.1: the map of the route with one marker per fence and the turn arrows, the legend beside it,
+ * and no control on screen. Returns the ways of the turns in route order as the map draws them, and the number of
+ * the fence that the first turn comes before (the legend names the turn before its fence).
+ */
+async function readWalk(page: Page, fenceCount: number): Promise<{ turns: ('left' | 'right')[]; firstTurnBefore: number }> {
+  const map = page.locator('[data-walk-map]');
+  await expect(map).toBeVisible({ timeout: 15_000 });
+  await expect(map.locator('[data-fence-marker]')).toHaveCount(fenceCount);
+  await expect(page.locator('[data-control]:visible')).toHaveCount(0);
+  const turns = await map.locator('[data-turn-marker]').evaluateAll((markers) => markers.map((marker) => marker.getAttribute('data-turn-marker')));
+  expect(turns.length).toBeGreaterThan(0);
+  for (const turn of turns) expect(['left', 'right']).toContain(turn);
+  const legend = await page.locator('[data-list="fences"] li').allTextContents();
+  const firstTurnBefore = legend.findIndex((item) => /turn (left|right) before it/.test(item)) + 1;
+  expect(firstTurnBefore).toBeGreaterThan(1);
+  // The legend and the map agree on the way of the first turn.
+  expect(legend[firstTurnBefore - 1]).toContain(`turn ${String(turns[0])} before it`);
+  return { turns: turns as ('left' | 'right')[], firstTurnBefore };
+}
+
+/**
+ * One real turn: both direction buttons light up when the turn window opens (never one more than the other: no hint
+ * of the way), the finger touches the button of the way the map showed, and the judge answers with a turn that costs
+ * no stop. Pressed as the window opens, about 2 s before the turn moment, it is a wide turn (giro abierto); a turn
+ * near the moment would be a tight one — both are taken without a stop.
+ */
+async function takeTurn(page: Page, direction: 'left' | 'right', ponyName: string): Promise<void> {
+  const left = page.locator('[data-control="turn-left"]');
+  const right = page.locator('[data-control="turn-right"]');
+  await expect(left).toHaveAttribute('data-window', 'open', { timeout: 60_000 });
+  await expect(right).toHaveAttribute('data-window', 'open');
+  const box = await (direction === 'left' ? left : right).boundingBox();
+  if (box === null) throw new Error(`the ${direction} button is not displayed`);
+  await page.touchscreen.tap(box.x + box.width / 2, box.y + box.height / 2);
+  const judged = new RegExp(`^${ponyName}: (giro cerrado|giro abierto)`);
+  try {
+    await expect.poll(() => captionsShown(page, judged), { timeout: 10_000 }).toBe(true);
+  } catch (error) {
+    const shown = await page.evaluate(() => (window as unknown as { __captions: string[] }).__captions);
+    throw new Error(`no caption ${judged.source} after the ${direction} turn; captions shown since the round began: ${JSON.stringify(shown)}`, { cause: error });
+  }
+  expect(await captionsShown(page, new RegExp(`^${ponyName}: (¡Recto!|recorrido equivocado)`))).toBe(false);
+}
+
+/**
  * The host starts the next class from the results screen. The server refuses start-class while the class is
  * still in its results phase (15 s), so the button is pressed again every two seconds until the walk is on.
  */
@@ -169,9 +221,10 @@ async function startAgain(page: Page): Promise<void> {
     .toBe('walk');
 }
 
-test('create → code → ring → admit → heights → walk → round with a caption → results → again', async ({ browser }) => {
-  // A class can run to its 150 s limit before the results come; two classes and the doorbell fit in 200 s.
-  test.setTimeout(200_000);
+test('create → code → ring → admit → heights → walk with the map → round with a turn and captions → results → again', async ({ browser }) => {
+  // A class can run to its 150 s limit before the results come; two classes (each after a 20 s walk) and the
+  // doorbell fit in 240 s.
+  test.setTimeout(240_000);
 
   const contexts: BrowserContext[] = [];
   const newPage = async (): Promise<Page> => {
@@ -216,19 +269,30 @@ test('create → code → ring → admit → heights → walk → round with a c
     await expectScreen(host, 'walk', 15_000);
     await expectScreen(friend, 'walk', 15_000);
     await expect(friend.locator('[data-list="fences"] li').first()).toContainText('Fence 1');
-    await expectScreen(host, 'round', 30_000);
-    await expectScreen(friend, 'round', 30_000);
+    // The map of the route (the production club course has eight fences) and no control during the walk.
+    const walk = await readWalk(friend, 8);
+    await readWalk(host, 8);
+    // The walk lasts CLASS_TIMING.walkMs = 20 s: the round screen with room to spare.
+    await expectScreen(host, 'round', 45_000);
+    await expectScreen(friend, 'round', 45_000);
     await recordCaptions(friend);
 
-    // The friend's first two fences: a real tap each, timed by the page, judged clean by the server; the host
-    // never taps and her horse jumps by itself (a rail each time).
+    // The friend's first two fences: a real tap each, timed by the page, judged clean by the server; and the turn
+    // before fence 3 (the club course has one, between fences 1 and 2 or between 2 and 3), taken by a real touch on
+    // the button of the way the map showed while both buttons are lit. The host never taps nor turns and her horse
+    // jumps by itself (a rail each time).
+    const firstTurn = walk.turns[0] ?? 'left';
+    expect(walk.firstTurnBefore).toBeLessThanOrEqual(3);
     await tapAtFence(friend, 1, 'Luna');
+    if (walk.firstTurnBefore === 2) await takeTurn(friend, firstTurn, 'Luna');
     await tapAtFence(friend, 2, 'Luna');
+    if (walk.firstTurnBefore === 3) await takeTurn(friend, firstTurn, 'Luna');
     await expect(host.locator('[data-hud-faults]')).not.toHaveText('0 faults', { timeout: 30_000 });
 
-    // The class runs to the results table with both riders. Their order is not pinned: neither presses a turn,
-    // so on a club course with turns both can end up eliminated with equal faults, and the server then orders
-    // them by account id — the two accepted jumps above are the proof of the input, not the places.
+    // The class runs to the results table with both riders. Their order is not pinned: after her first turn the
+    // friend presses no more turns, so on a club course with turns both can end up eliminated with equal faults, and
+    // the server then orders them by account id — the accepted jumps and the turn above are the proof of the input,
+    // not the places.
     await expectScreen(host, 'results', 150_000);
     await expectScreen(friend, 'results', 150_000);
     // First the heat that just ended (the results phase, CLASS_TIMING.resultsMs = 15 s even after the last heat),
