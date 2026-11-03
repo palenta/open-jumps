@@ -212,6 +212,16 @@ export class RoundEngine {
     });
   }
 
+  /**
+   * A rider's undecided approach (CourseRunner.undecidedApproach) and the hard-turn flag in force, for a client that
+   * takes control back (audit K1 r2 #1); null for a rider who is not in this round.
+   */
+  approachOf(riderId: string): { approach: { fence: number; attempt: number; t0: number } | null; hardTurn: boolean } | null {
+    const entry = this.byId.get(riderId);
+    if (!entry) return null;
+    return { approach: entry.runner.undecidedApproach(), hardTurn: entry.runner.snapshot().recentHardTurn };
+  }
+
   riderDisconnected(riderId: string, now: number): void {
     this.byId.get(riderId)?.runner.disconnected(now);
   }

@@ -64,7 +64,7 @@ const FIRST_STATE_TIMEOUT_MS = 5000;
  * - Every 'clock-ping' is answered at once with clock.onPing(serverSent) as the 'room' message.
  * - state: the latest snapshot (state.toJSON()); onState fires after every patch.
  * - Messages reach onMessage listeners as ServerMessage ('round-event' carries the event under `event`);
- *   'class-course' is also remembered as course().
+ *   'class-course' is also remembered as course(); a malformed 'approach-sync' is dropped.
  * - A leave code 4100 → ended 'kicked', 4101 → 'revoked', a consented leave → 'left'. Any other close: with the
  *   SDK's retries ON, the SDK's onDrop makes the status 'dropped' and the SDK retries by itself — a successful
  *   retry → 'connected', and the final onLeave once the retries are exhausted (or refused at once: uptime too
@@ -312,6 +312,18 @@ function decode(type: string, payload: unknown): ServerMessage | null {
       };
     case 'round-event':
       return { type, event: payload as Extract<ServerMessage, { type: 'round-event' }>['event'] };
+    case 'approach-sync': {
+      const approach = (p.approach ?? null) as Record<string, unknown> | null;
+      const valid = approach !== null && typeof approach.fence === 'number' && typeof approach.attempt === 'number' && typeof approach.t0 === 'number';
+      if (typeof p.classNumber !== 'number' || typeof p.heatIndex !== 'number' || (approach !== null && !valid)) return null;
+      return {
+        type,
+        classNumber: p.classNumber,
+        heatIndex: p.heatIndex,
+        hardTurn: p.hardTurn === true,
+        approach: approach === null ? null : { fence: approach.fence as number, attempt: approach.attempt as number, t0: approach.t0 as number },
+      };
+    }
     case 'class-table':
       return { type, table: (p.table ?? {}) as Extract<ServerMessage, { type: 'class-table' }>['table'] };
     case 'refused':

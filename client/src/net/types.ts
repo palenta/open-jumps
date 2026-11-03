@@ -165,6 +165,12 @@ export type ServerMessage =
   /** A phase began at `startedAt` (server ms); `endsAt` is when its timer ends — walk and results — or null (riding, done). */
   | { type: 'class-phase'; phase: Exclude<RoomPhase, 'lobby'>; heatIndex: number; startedAt: number; endsAt: number | null }
   | { type: 'round-event'; event: RoundEventWire }
+  /**
+   * To a rider of the running heat who takes control back (a reconnection by token, or a fresh join during the heat),
+   * to that connection only: the approach the server has open for the own horse right now and still undecided, or
+   * null when none is (between fences, in flight, stopped), with the hard-turn flag in force (audit K1 r2 #1).
+   */
+  | { type: 'approach-sync'; classNumber: number; heatIndex: number; hardTurn: boolean; approach: { fence: number; attempt: number; t0: number } | null }
   | { type: 'class-table'; table: ClassTableWire }
   | { type: 'refused'; error: string }
   | { type: 'emote'; from: string; emote: EmoteId };

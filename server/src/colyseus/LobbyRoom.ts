@@ -57,9 +57,15 @@ export interface LobbyRoomDeps {
  * - A dropped connection during 'riding' keeps the seat for reconnectSeconds (Colyseus allowReconnection) with
  *   the horse on autopilot; a reconnection with the token — or a fresh join by the same account, also after the
  *   reservation expired — hands control back; an expired reservation never withdraws the rider (the horse waits
- *   and the time limit decides, plan 2.3). A kick or a session revocation while a reconnection is pending rejects
- *   it (the old token is dead, B1 checks are never bypassed). A consented leave withdraws the rider (eliminated
- *   'disconnected'); the heat goes on, also with no client connected at all.
+ *   and the time limit decides, plan 2.3). On handing control back the room sends that connection — and only it —
+ *   'approach-sync' { classNumber, heatIndex, hardTurn, approach: { fence, attempt, t0 } | null }: the approach the
+ *   server has open for the rider's horse right now and still undecided (null between fences, in flight, stopped),
+ *   and the hard-turn flag in force; the 'approach' broadcast went only to the connections alive when it opened, so
+ *   this is how a returning client arms (or disarms) its take-off tap (audit K1 r2 #1). A fresh join gets it right
+ *   after 'class-course' and 'class-phase'; a token reconnection also gets a new clock series, on the NEW
+ *   connection. A kick or a session revocation while a reconnection is pending rejects it (the old token is dead,
+ *   B1 checks are never bypassed). A consented leave withdraws the rider (eliminated 'disconnected'); the heat goes
+ *   on, also with no client connected at all.
  * - When a heat ends, every result is written with results.insertOnce; the class table is sent as 'class-table'
  *   { table } to everyone when the class is done, and to any client that joins while the class is already done.
  *   A client joining during a class gets 'class-course', then 'class-phase' for the phase in progress (with its
@@ -381,6 +387,7 @@ export class LobbyRoom extends Room<{ state: LobbyState }> {
       client.send('class-course', { course: this.course, classNumber: this.classNumber });
       const startedAt = this.flow.phaseStartedAt;
       if (startedAt !== null) client.send('class-phase', { phase: this.flow.phase, heatIndex: this.flow.heatIndex, startedAt, endsAt: this.flow.phaseEndsAt() });
+      this.syncApproach(client, accountId);
     }
     if (this.flow?.phase === 'done' && this.lastTable !== null) client.send('class-table', { table: this.lastTable });
   }
@@ -441,17 +448,35 @@ export class LobbyRoom extends Room<{ state: LobbyState }> {
     const deferred = this.allowReconnection(client, seconds);
     this.reconnections.set(accountId, { sessionId: client.sessionId, reject: () => deferred.reject() });
     try {
-      await deferred;
+      const back = await deferred;
       this.reconnections.delete(accountId);
       this.accountBySession.set(client.sessionId, accountId);
       if (this.heatRiders.has(accountId)) this.flow?.riderReconnected(accountId, this.serverNow());
-      this.startClockSync(client);
+      // Messages go to the NEW Client object: Colyseus marks the previous one RECONNECTED and drops whatever is sent
+      // to it, so the clock series used to vanish here (found with audit K1 r2 #1).
+      this.startClockSync(back);
+      this.syncApproach(back, accountId);
     } catch {
       // Expired, rejected or superseded: the socket is gone; the rider keeps riding (autopilot, then waiting).
       if (this.reconnections.get(accountId)?.sessionId === client.sessionId) this.reconnections.delete(accountId);
       this.forgetSession(client.sessionId);
       this.syncDoor();
     }
+  }
+
+  /**
+   * Tell a rider of the running heat who takes control back — by the token or by a fresh join — the approach the
+   * server has open for their horse right now (audit K1 r2 #1): the 'approach' broadcast went only to the connections
+   * alive when it opened, so the returning client would otherwise never arm the tap of the approach in progress, and
+   * a null approach disarms one whose verdict it missed. Sent to this connection only.
+   */
+  private syncApproach(client: Client, accountId: string): void {
+    const flow = this.flow;
+    const engine = flow?.engine() ?? null;
+    if (flow === null || engine === null || !this.heatRiders.has(accountId)) return;
+    const own = engine.approachOf(accountId);
+    if (own === null) return;
+    client.send('approach-sync', { classNumber: this.classNumber, heatIndex: flow.heatIndex, hardTurn: own.hardTurn, approach: own.approach });
   }
 
   private rejectReconnection(accountId: string): void {

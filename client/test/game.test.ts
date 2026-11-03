@@ -1699,6 +1699,101 @@ describe('between the heats and at the end (audit K1 r1 #2)', () => {
 
 // ---- lifecycle ------------------------------------------------------------------------------------------------
 
+describe('taking control back (audit K1 r2 #1)', () => {
+  /** The server's 'approach-sync' for the own horse: the approach open now (server time = device time here), or none. */
+  const approachSync = (approach: { fence: number; attempt: number; t0: number } | null, classNumber = 1, heatIndex = 0, hardTurn = false): ServerMessage => ({
+    type: 'approach-sync',
+    classNumber,
+    heatIndex,
+    hardTurn,
+    approach,
+  });
+  const tapControl = (h: Harness) => q(h.root, '[data-control="tap"]');
+
+  it('the SDK recovered after the approach opened while she was away: approach-sync lights the tap zone with its take-off moment and her press sends the tap of that approach', async () => {
+    const h = await inRound();
+    h.session().emitStatus('dropped');
+    await settle();
+    h.clock.t += 1_500; // the approach opened in this second; its broadcast went to the connections alive then
+    h.session().emitStatus('connected');
+    h.session().emitState(ridingState({ riders: { host: rider('host', { positionM: 19 }), ana: rider('ana') } }));
+    press(h, TAP);
+    expect(h.session().sentOf('tap')).toEqual([]); // nothing to arm from the state alone
+    const t0 = h.clock.now() + 1_500;
+    h.session().emitMessage(approachSync({ fence: 1, attempt: 1, t0 }));
+    h.game.frame(h.clock.now());
+    expect(tapControl(h).getAttribute('data-armed')).toBe('true');
+    expect(tapControl(h).getAttribute('data-takeoff-at')).toBe(String(t0));
+    h.clock.t = t0 + 100;
+    press(h, TAP);
+    expect(h.session().sentOf('tap')).toEqual([{ type: 'tap', clientTime: t0 + 100, fence: 1, attempt: 1 }]);
+    expect(text(h.root.querySelector('[data-hud-caption]'))).not.toBe(''); // the instant hint judged it against that t0
+  });
+
+  it('a fresh join through Reconnect: the new round modules get class-course and the running heat, then approach-sync arms them, and her press goes out on the new session', async () => {
+    const h = await hostInLobby({ roomStatus: [ok<RoomStatusReply>({ status: 'host', roomId: 'r1' })] });
+    startClass(h);
+    await settle();
+    h.session().endWith({ kind: 'lost', code: 1006 });
+    await settle();
+    h.settings.stateOnConnect = ridingState({ riders: { host: rider('host', { positionM: 20 }), ana: rider('ana') } });
+    click(h.root, '[data-action="reconnect"]');
+    await settle();
+    const fresh = h.session();
+    expect(h.sessions).toHaveLength(2);
+    fresh.emitMessage({ type: 'class-course', course, classNumber: 1 });
+    fresh.emitMessage(phaseMessage('riding', 0, 0, null));
+    const t0 = h.clock.now() + 2_000;
+    fresh.emitMessage(approachSync({ fence: 1, attempt: 1, t0 }));
+    await settle();
+    expect(h.root.dataset.screen).toBe('round');
+    h.game.frame(h.clock.now());
+    expect(tapControl(h).getAttribute('data-armed')).toBe('true');
+    h.clock.t = t0 + 100;
+    press(h, TAP);
+    expect(fresh.sentOf('tap')).toEqual([{ type: 'tap', clientTime: t0 + 100, fence: 1, attempt: 1 }]);
+    expect(h.sessions[0]?.sentOf('tap')).toEqual([]);
+  });
+
+  it('approach-sync with no approach open removes an arming whose verdict was missed: the zone goes dark and a press sends nothing', async () => {
+    const h = await inApproach();
+    h.session().emitStatus('dropped');
+    h.clock.t += 2_000; // the autopilot decided while she was away
+    h.session().emitStatus('connected');
+    h.session().emitState(ridingState({ riders: { host: rider('host', { nextFence: 2, positionM: 33 }), ana: rider('ana') } }));
+    h.session().emitMessage(approachSync(null));
+    h.game.frame(h.clock.now());
+    expect(tapControl(h).hasAttribute('data-armed')).toBe(false);
+    press(h, TAP);
+    expect(h.session().sentOf('tap')).toEqual([]);
+  });
+
+  it('the attempt whose tap already went out is not armed again by a sync of the same attempt', async () => {
+    const h = await inApproach();
+    h.clock.t += 1_000;
+    press(h, TAP);
+    expect(h.session().sentOf('tap')).toHaveLength(1);
+    h.session().emitStatus('dropped');
+    h.session().emitStatus('connected');
+    h.session().emitMessage(approachSync({ fence: 1, attempt: 1, t0: h.clock.now() }));
+    h.clock.t += 50;
+    press(h, TAP);
+    expect(h.session().sentOf('tap')).toHaveLength(1);
+  });
+
+  it('an approach-sync of another class or another heat than the one on screen changes nothing', async () => {
+    const h = await inRound();
+    const t0 = h.clock.now() + 1_000;
+    h.session().emitMessage(approachSync({ fence: 1, attempt: 1, t0 }, 2, 0));
+    h.session().emitMessage(approachSync({ fence: 1, attempt: 1, t0 }, 1, 1));
+    h.game.frame(h.clock.now());
+    expect(tapControl(h).hasAttribute('data-armed')).toBe(false);
+    h.clock.t = t0;
+    press(h, TAP);
+    expect(h.session().sentOf('tap')).toEqual([]);
+  });
+});
+
 describe('the tab lifecycle', () => {
   it('the tab becoming visible and pageshow each resume the session', async () => {
     const h = await hostInLobby();

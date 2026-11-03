@@ -248,6 +248,16 @@ export class CourseRunner {
     };
   }
 
+  /**
+   * The approach open right now whose take-off is still undecided — what a client taking control back must arm its
+   * tap for (audit K1 r2 #1) — or null: between fences, in flight (the decision is taken), stopped, waiting or done.
+   */
+  undecidedApproach(): { fence: number; attempt: number; t0: number } | null {
+    const approach = this.approach;
+    if (!approach || approach.applied || approach.judge.decision.decided) return null;
+    return { fence: approach.fence.number, attempt: approach.attempt, t0: approach.t0 };
+  }
+
   /** The approach state as of `time` (change log rewind), or null when no approach is open at that time. */
   approachAt(time: number): ApproachState | null {
     const approach = this.approach;

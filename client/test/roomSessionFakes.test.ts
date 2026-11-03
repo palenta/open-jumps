@@ -5,7 +5,7 @@
 import { describe, expect, it } from 'vitest';
 import { ClientClock } from '../src/net/clientClock.js';
 import { RoomSession, type RoomLike, type SdkLike, type SessionStatus } from '../src/net/roomSession.js';
-import type { LobbyStateSnapshot } from '../src/net/types.js';
+import type { LobbyStateSnapshot, ServerMessage } from '../src/net/types.js';
 
 const state = (over: Partial<LobbyStateSnapshot> = {}): LobbyStateSnapshot => ({
   code: 'ABCDEF',
@@ -43,7 +43,16 @@ class FakeRoom implements RoomLike {
     this.stateListeners.push(callback);
   }
 
-  onMessage(): void {}
+  private messageListener: ((type: string | number, payload: unknown) => void) | null = null;
+
+  onMessage(_type: '*', callback: (type: string | number, payload: unknown) => void): void {
+    this.messageListener = callback;
+  }
+
+  /** A server message reaches the room's wildcard handler. */
+  deliver(type: string, payload: unknown): void {
+    this.messageListener?.(type, payload);
+  }
 
   onLeave(callback: (code: number, reason?: string) => void): void {
     this.leaveListeners.push(callback);
@@ -216,5 +225,21 @@ describe('the reconnection token after the SDK reconnected by itself (audit K1 r
     sdk.nextReconnect = new FakeRoom('t2');
     expect(await session.resume()).toBe(true);
     expect(sdk.reconnectCalls).toEqual(['r1:fresh']);
+  });
+});
+
+describe("the 'approach-sync' message (audit K1 r2 #1)", () => {
+  it('reaches the listeners typed, with or without an approach; a malformed one is dropped', async () => {
+    const { room, session } = await connected(true);
+    const messages: ServerMessage[] = [];
+    session.onMessage((message) => messages.push(message));
+    room.deliver('approach-sync', { classNumber: 1, heatIndex: 0, hardTurn: true, approach: { fence: 2, attempt: 1, t0: 61_234.5 } });
+    room.deliver('approach-sync', { classNumber: 1, heatIndex: 0, hardTurn: false, approach: null });
+    room.deliver('approach-sync', { classNumber: 1, heatIndex: 0, hardTurn: false, approach: { fence: 2 } });
+    room.deliver('approach-sync', { heatIndex: 0, approach: null });
+    expect(messages).toEqual([
+      { type: 'approach-sync', classNumber: 1, heatIndex: 0, hardTurn: true, approach: { fence: 2, attempt: 1, t0: 61_234.5 } },
+      { type: 'approach-sync', classNumber: 1, heatIndex: 0, hardTurn: false, approach: null },
+    ]);
   });
 });

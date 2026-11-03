@@ -77,6 +77,24 @@ export class InstantHint {
     this.shown = null;
   }
 
+  /**
+   * The server's 'approach-sync' on taking control back (audit K1 r2 #1): its hard-turn flag, and the approach open
+   * now — the same approach keeps its tap and hint; another one opens afresh; null closes the one whose verdict was
+   * missed.
+   */
+  sync(sync: { hardTurn: boolean; approach: { fence: number; attempt: number; t0: number } | null }): void {
+    this.hardTurn = sync.hardTurn;
+    const next = sync.approach;
+    if (next === null) {
+      this.open = null;
+      this.shown = null;
+      return;
+    }
+    const open = this.open;
+    if (open !== null && open.fence === next.fence && open.attempt === next.attempt) return;
+    this.approach(next);
+  }
+
   setGear(gear: Gear): void {
     this.gear = gear;
   }

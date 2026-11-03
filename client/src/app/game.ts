@@ -172,7 +172,10 @@ interface RoundModules {
  *   the player sees the zone light up and a test can time its finger; both attributes go at the verdict. The
  *   take-off tap itself is armed by the same two events (InputController.approach / approachClosed): a finger on
  *   the tap zone between approaches — before the first one, or during the flight after a cleared fence, when the
- *   state already names the next fence — sends nothing and spends nothing (audit K1 r1 #1).
+ *   state already names the next fence — sends nothing and spends nothing (audit K1 r1 #1). A rider who takes control
+ *   back — the SDK recovered, resume(), or a fresh join through Reconnect — missed the broadcasts of the time away:
+ *   the server's 'approach-sync' (the approach open now, or none) arms or disarms the tap, the lit zone and the hint
+ *   the same way, and an attempt whose tap already went out is never armed twice (audit K1 r2 #1).
  *   The round-side modules (InstantHint, InputController, RemoteInterpolator, RoundClockEstimate) are created
  *   anew at every class-course message, so a new class starts clean (a new round key, an empty buffer: the other
  *   horses are drawn from the new class's samples only, never from the last class's positions).
@@ -390,6 +393,22 @@ export function createGame(deps: GameDeps): Game {
     }
   }
 
+  /**
+   * The server's 'approach-sync' on taking control back (audit K1 r2 #1): the approach open for the own horse right now
+   * — or none — arms or disarms the tap, the lit zone and the hint together, as the missed 'approach' event or
+   * 'takeoff' verdict would have; never from the state's nextFence. A sync of another class or heat changes nothing.
+   */
+  function onApproachSync(message: Extract<ServerMessage, { type: 'approach-sync' }>): void {
+    if (!round || message.classNumber !== round.classNumber) return;
+    const current = state();
+    if (current !== null && current.heatIndex !== message.heatIndex) return;
+    const approach = message.approach;
+    round.controller.sync(`${String(message.classNumber)}#${String(message.heatIndex)}`, approach);
+    round.hint.sync({ hardTurn: message.hardTurn, approach });
+    const takeoffAt = approach === null ? null : deps.clock.toClient(approach.t0);
+    round.armed = approach === null || takeoffAt === null ? null : { fence: approach.fence, attempt: approach.attempt, takeoffAt };
+  }
+
   // ---- the session ------------------------------------------------------------------------------------------
 
   function dropSession(): void {
@@ -476,6 +495,10 @@ export function createGame(deps: GameDeps): Game {
         break;
       case 'refused':
         if (round) round.caption = { event: { type: 'refused', error: message.error }, riderId: me?.id ?? '' };
+        updateHud();
+        break;
+      case 'approach-sync':
+        onApproachSync(message);
         updateHud();
         break;
       case 'class-phase':

@@ -350,3 +350,33 @@ describe('InstantHint.verdict', () => {
     expect(hint.tap(T0 + 20)).toBeNull();
   });
 });
+
+describe('InstantHint.sync (audit K1 r2 #1)', () => {
+  it('opens the approach missed while away, with the server\'s hard turn: a tap is judged against its t0 with the narrowed window', () => {
+    const hint = new InstantHint(readyClock(0), context70);
+    expect(hint.tap(T0 + 140)).toBeNull(); // back from a drop: no approach heard
+    hint.sync({ hardTurn: true, approach: { fence: 1, attempt: 2, t0: T0 } });
+    const shown = hint.tap(T0 + 140);
+    expect(shown).toMatchObject({ fence: 1, attempt: 2, offsetMs: 140 });
+    expect(shown?.outcome).toEqual(judged(140, { recentHardTurn: true }));
+    expect(shown?.outcome.kind).toBe('chip');
+  });
+
+  it('a sync of the approach already open and tapped keeps it tapped: no second hint for that attempt', () => {
+    const hint = armed();
+    const first = hint.tap(T0 + 10);
+    hint.sync({ hardTurn: false, approach: { fence: 1, attempt: 1, t0: T0 } });
+    expect(hint.tap(T0 + 50)).toBeNull();
+    expect(hint.current()).toEqual(first);
+  });
+
+  it('a sync with no approach closes the open one (its verdict was missed) and drops a hard turn the server no longer has', () => {
+    const hint = armed();
+    hint.setHardTurn(true);
+    hint.sync({ hardTurn: false, approach: null });
+    expect(hint.tap(T0 + 10)).toBeNull();
+    expect(hint.current()).toBeNull();
+    hint.approach({ fence: 2, attempt: 1, t0: 9000 });
+    expect(hint.tap(9000 + 140)?.outcome).toEqual(judged(140));
+  });
+});

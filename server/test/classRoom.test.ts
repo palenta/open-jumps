@@ -823,3 +823,89 @@ describe('audit round 2 of B2: the reservation is for the room the URL names, re
     await hostSeat.client.leave();
   }, 110000);
 });
+
+type ApproachSync = { classNumber: number; heatIndex: number; hardTurn: boolean; approach: { fence: number; attempt: number; t0: number } | null };
+const approachSyncs = (seat: Seat) => seat.received.filter((m) => m.type === 'approach-sync').map((m) => m.payload as ApproachSync);
+
+/** A seat for a connection the SDK already holds (a reconnection by token): the same recording and clock answers as sit(). */
+function reattach(client: ClientRoom<LobbyState>, rider: Rider, skewMs = 0): Seat {
+  const seat: Seat = { id: rider.account.id, token: rider.token, skewMs, muted: false, client, received: [] };
+  client.onMessage('*', (type, payload) => seat.received.push({ type: String(type), payload }));
+  client.onMessage('clock-ping', (ping: { serverSent: number }) => {
+    seat.received.push({ type: 'clock-ping', payload: ping });
+    if (!seat.muted) client.send('room', { type: 'clock-pong', serverSent: ping.serverSent, clientTime: Date.now() + seat.skewMs });
+  });
+  return seat;
+}
+
+describe('audit K1 r2 #1: a rider who takes control back is told the approach in progress (approach-sync)', () => {
+  /** Two riders on LIVE_COURSE (zone at 18 m ≈ 3.6 s, t0 at 30 m ≈ 6.0 s); the friend's connection goes away at 10 m. */
+  async function friendAwayAtTenMetres() {
+    const { entry, room, riders } = await openRoom(2);
+    const [host, friend] = riders as [Rider, Rider];
+    const hostSeat = await sit(room.roomId, entry.code, host.token, host.account.id);
+    const friendSeat = await sit(room.roomId, entry.code, friend.token, friend.account.id, { skewMs: 1500 });
+    await clocksSynced();
+    await startRiding(hostSeat);
+    await until(() => (hostSeat.client.state.riders.get(friend.account.id)?.positionM ?? 0) >= 10, 5000, 'the friend at 10 m');
+    const token = friendSeat.client.reconnectionToken;
+    await friendSeat.client.leave(false); // the tab went to sleep
+    await until(() => hostSeat.client.state.riders.get(friend.account.id)?.autopilot === true, 3000, 'autopilot on after the drop');
+    return { entry, room, host, friend, hostSeat, friendSeat, token };
+  }
+
+  it('back by the token after the approach opened: approach-sync with that approach reaches her new connection only, a new clock series follows, and her tap at t0 is judged as hers', async () => {
+    const { friend, hostSeat, friendSeat, token } = await friendAwayAtTenMetres();
+    await until(() => roundEvents(hostSeat, 'approach', friend.account.id).length > 0, 5000, 'her approach opening while she is away');
+    const approach = roundEvents(hostSeat, 'approach', friend.account.id)[0] as unknown as ApproachEvent;
+    expect(roundEvents(friendSeat, 'approach', friend.account.id)).toEqual([]); // the broadcast never reached her
+    const back = reattach(await sdk(friend.token).reconnect<LobbyState>(token), friend, 1500);
+    await until(() => approachSyncs(back).length > 0, 2000, 'approach-sync on the new connection');
+    expect(approachSyncs(back)).toEqual([{ classNumber: 1, heatIndex: 0, hardTurn: false, approach: { fence: approach.fence, attempt: approach.attempt, t0: approach.t0 } }]);
+    expect(approachSyncs(hostSeat)).toEqual([]);
+    // The reconnected connection is measured again (the series goes to the NEW connection, not the stale one).
+    await until(() => clockPings(back).length >= 3, 2000, 'a clock series on the new connection');
+    expect(approach.t0 - serverNow()).toBeGreaterThan(300);
+    tapAtT0(back, approach);
+    await until(() => roundEvents(hostSeat, 'takeoff', friend.account.id).length > 0, 5000, 'her take-off');
+    const takeoff = roundEvents(hostSeat, 'takeoff', friend.account.id)[0] as unknown as TakeoffEvent & { fence: number; attempt: number };
+    expect(takeoff).toMatchObject({ fence: approach.fence, attempt: approach.attempt });
+    expect(takeoff.offsetMs).not.toBeNull(); // her tap, not "no tap" at the deadline
+    expect(Math.abs(takeoff.offsetMs ?? 999)).toBeLessThan(120);
+    expect(refusals(back)).toEqual([]);
+    await back.client.leave();
+    await hostSeat.client.leave();
+  }, 30000);
+
+  it('back by a fresh join after the approach opened: class-course, class-phase, then approach-sync for it; her tap at t0 is judged as hers', async () => {
+    const { entry, room, friend, hostSeat } = await friendAwayAtTenMetres();
+    await until(() => roundEvents(hostSeat, 'approach', friend.account.id).length > 0, 5000, 'her approach opening while she is away');
+    const approach = roundEvents(hostSeat, 'approach', friend.account.id)[0] as unknown as ApproachEvent;
+    const again = await sit(room.roomId, entry.code, friend.token, friend.account.id, { skewMs: 1500 });
+    await until(() => approachSyncs(again).length > 0, 2000, 'approach-sync on the fresh connection');
+    const order = again.received.map((m) => m.type).filter((type) => type === 'class-course' || type === 'class-phase' || type === 'approach-sync');
+    expect(order).toEqual(['class-course', 'class-phase', 'approach-sync']);
+    expect(approachSyncs(again)).toEqual([{ classNumber: 1, heatIndex: 0, hardTurn: false, approach: { fence: approach.fence, attempt: approach.attempt, t0: approach.t0 } }]);
+    expect(approachSyncs(hostSeat)).toEqual([]);
+    await until(() => clockPings(again).length >= 4, 2000, 'the fresh clock series'); // three answered pongs make it ready
+    expect(approach.t0 - serverNow()).toBeGreaterThan(300);
+    tapAtT0(again, approach);
+    await until(() => roundEvents(hostSeat, 'takeoff', friend.account.id).length > 0, 5000, 'her take-off');
+    const takeoff = roundEvents(hostSeat, 'takeoff', friend.account.id)[0] as unknown as TakeoffEvent;
+    expect(takeoff.offsetMs).not.toBeNull();
+    expect(Math.abs(takeoff.offsetMs ?? 999)).toBeLessThan(120);
+    expect(refusals(again)).toEqual([]);
+    await again.client.leave();
+    await hostSeat.client.leave();
+  }, 30000);
+
+  it('back before the approach opened: approach-sync says null (nothing to arm), and the approach event itself arrives later on the new connection', async () => {
+    const { friend, hostSeat, token } = await friendAwayAtTenMetres();
+    const back = reattach(await sdk(friend.token).reconnect<LobbyState>(token), friend, 1500);
+    await until(() => approachSyncs(back).length > 0, 2000, 'approach-sync on the new connection');
+    expect(approachSyncs(back)).toEqual([{ classNumber: 1, heatIndex: 0, hardTurn: false, approach: null }]);
+    await until(() => roundEvents(back, 'approach', friend.account.id).length > 0, 5000, 'the approach broadcast on the new connection');
+    await back.client.leave();
+    await hostSeat.client.leave();
+  }, 30000);
+});

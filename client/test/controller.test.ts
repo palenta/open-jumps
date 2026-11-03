@@ -292,3 +292,57 @@ describe('InputController across classes', () => {
     expect(sent).toEqual([]);
   });
 });
+
+describe('InputController sync from the server (audit K1 r2 #1)', () => {
+  it('an approach opened while the client was away: the sync arms it and the tap goes out with its fence and attempt', () => {
+    const { input, sent } = ridingController(); // back from a drop: no 'approach' event was ever heard
+    expect(input.press('tap', 5000)).toBeNull();
+    input.sync('1#0', { fence: 1, attempt: 1 });
+    expect(input.armed).toBe(true);
+    expect(input.press('tap', 6100)).toEqual({ type: 'tap', clientTime: 6100, fence: 1, attempt: 1 });
+    expect(input.armed).toBe(false);
+    expect(sent).toHaveLength(1);
+  });
+
+  it('a sync with no approach open disarms one whose verdict was missed: the press is nothing', () => {
+    const { input, sent } = armedController();
+    input.sync('1#0', null); // the autopilot decided while she was away; the 'takeoff' never reached her
+    expect(input.armed).toBe(false);
+    expect(input.press('tap', 6100)).toBeNull();
+    expect(sent).toEqual([]);
+  });
+
+  it('the attempt whose tap already went out is never armed again — neither by a repeated sync nor by a repeated approach event — while the next attempt is', () => {
+    const { input, sent } = armedController();
+    expect(input.press('tap', 6010)).toMatchObject({ type: 'tap', fence: 1, attempt: 1 });
+    input.sync('1#0', { fence: 1, attempt: 1 });
+    expect(input.armed).toBe(false);
+    expect(input.press('tap', 6050)).toBeNull();
+    input.approach({ fence: 1, attempt: 1 });
+    expect(input.press('tap', 6060)).toBeNull();
+    expect(sent).toHaveLength(1);
+    input.sync('1#0', { fence: 1, attempt: 2 }); // a refusal she missed: the re-attempt is open now
+    expect(input.press('tap', 12_000)).toEqual({ type: 'tap', clientTime: 12_000, fence: 1, attempt: 2 });
+    expect(sent).toHaveLength(2);
+  });
+
+  it('never armed by the state: in flight the server says no approach, and a press stays nothing although the state names the next fence', () => {
+    const { input, sent } = armedController();
+    input.press('tap', 6000);
+    input.approachClosed();
+    input.update(riding(2, 1));
+    input.sync('1#0', null);
+    expect(input.press('tap', 6300)).toBeNull();
+    expect(sent).toHaveLength(1);
+  });
+
+  it('a sync of another round changes nothing: it neither arms nor disarms', () => {
+    const { input, sent } = ridingController();
+    input.sync('1#1', { fence: 1, attempt: 1 }); // a stale sync of the next heat, say
+    expect(input.press('tap', 6000)).toBeNull();
+    input.approach({ fence: 1, attempt: 1 });
+    input.sync('0#3', null);
+    expect(input.press('tap', 6010)).toMatchObject({ type: 'tap', fence: 1, attempt: 1 });
+    expect(sent).toHaveLength(1);
+  });
+});

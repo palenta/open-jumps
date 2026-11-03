@@ -2,8 +2,10 @@
 // 'approach' event for the own horse, stamped with the device clock at pointer-down and sent once per approach
 // (the first tap decides on the server too); a press while no approach is open is nothing — it is neither sent
 // nor remembered, so it can never spend the tap of the attempt that follows (audit K1 r1 #1: the state names the
-// next fence from the decision on, 600 ms before the horse even lands); 'left' / 'right' are a turn while a turn
-// window is open, otherwise a line shift; the pace button cycles the gear.
+// next fence from the decision on, 600 ms before the horse even lands); a client that takes control back after a
+// drop is told the approach in progress by the server's 'approach-sync' instead (audit K1 r2 #1), and an attempt
+// whose tap already went out is never armed twice; 'left' / 'right' are a turn while a turn window is open,
+// otherwise a line shift; the pace button cycles the gear.
 import type { Gear } from '@open-jumps/shared';
 import type { Control } from './layout.js';
 import type { ClientRoomMessage } from '../net/types.js';
@@ -35,10 +37,16 @@ export interface InputControllerDeps {
 
 /**
  * - update(): the own rider's view from the room state; a new round key (the next class or heat) drops the open
- *   approach, so a stale one never arms a tap in the next round.
+ *   approach and the memory of the last tap, so a stale one never arms (or blocks) a tap in the next round.
  * - approach(event): the server opened the own horse's approach (its 'approach' event) — the tap is armed for THAT
  *   fence and attempt, whatever the state patch says; approachClosed(): its 'takeoff' verdict arrived — disarmed
  *   until the next approach (a refusal's new attempt and the next fence each bring their own approach).
+ * - sync(round, approach): the server's 'approach-sync' for a client taking control back (audit K1 r2 #1) — the
+ *   approach open for the own horse right now arms the tap as an 'approach' event would; null disarms (no approach
+ *   is open: between fences, in flight, stopped — the verdict of the old one was missed). A sync of another round
+ *   than the state's is ignored. Never armed from the state's nextFence.
+ * - One tap per attempt: the fence and attempt of the last tap that went out are remembered for the round, and
+ *   neither a repeated approach event nor a sync arms that attempt again.
  * - press(control, clientTime): the message sent, or null when nothing was (not riding; a tap with no approach open
  *   or a second tap in the same approach; an unknown control). clientTime is the ClientClock reading at pointer-down.
  * - turnAhead() opens the turn window for turnWindowMs (or until turnTaken()); a 'turn-left'/'turn-right' press
@@ -51,6 +59,8 @@ export class InputController {
   private state: RiderInputState | null = null;
   /** The open approach of the own horse and whether its one tap went out; null between approaches. */
   private open: (OpenApproach & { tapped: boolean }) | null = null;
+  /** The approach whose tap went out last in this round: that attempt is never armed again. */
+  private lastTap: OpenApproach | null = null;
   /** Device time until which a direction press is a turn; null when no window is open. */
   private turnWindowUntil: number | null = null;
   private gear: Gear = 'collected';
@@ -61,13 +71,24 @@ export class InputController {
   }
 
   update(state: RiderInputState): void {
-    if (this.state !== null && this.state.round !== state.round) this.open = null;
+    if (this.state !== null && this.state.round !== state.round) {
+      this.open = null;
+      this.lastTap = null;
+    }
     this.state = { ...state };
   }
 
-  /** The server opened the own horse's approach: arms the tap for this fence and attempt (one tap per approach). */
+  /** The server opened the own horse's approach: arms the tap for this fence and attempt (one tap per attempt). */
   approach(event: OpenApproach): void {
-    this.open = { fence: event.fence, attempt: event.attempt, tapped: false };
+    const spent = this.lastTap !== null && this.lastTap.fence === event.fence && this.lastTap.attempt === event.attempt;
+    this.open = { fence: event.fence, attempt: event.attempt, tapped: spent };
+  }
+
+  /** The server's view of the own horse's approach for `round` on taking control back: armed for it, or disarmed (null). */
+  sync(round: string, approach: OpenApproach | null): void {
+    if (this.state !== null && this.state.round !== round) return;
+    if (approach === null) this.open = null;
+    else this.approach(approach);
   }
 
   /** The server's verdict on the open approach arrived: no tap until the next approach. */
@@ -98,6 +119,7 @@ export class InputController {
         const open = this.open;
         if (open === null || open.tapped) return null;
         open.tapped = true;
+        this.lastTap = { fence: open.fence, attempt: open.attempt };
         message = { type: 'tap', clientTime, fence: open.fence, attempt: open.attempt };
         break;
       }

@@ -160,6 +160,35 @@ describe('taps and the decision moment (matrix row 3)', () => {
     expect(r.snapshot()).toMatchObject({ phase: 'stopped', positionM: 28, nextFence: 1, attempt: 2 });
   });
 
+  it('undecidedApproach (audit K1 r2 #1): the open, undecided approach only — never before the zone, in flight, stopped or once a tap decided it', () => {
+    const r = runner();
+    drive(r, 0, 3550);
+    expect(r.undecidedApproach()).toBeNull(); // not in the zone yet
+    r.tick(3600);
+    expect(r.undecidedApproach()).toEqual({ fence: 1, attempt: 1, t0: 6000 });
+    r.setLine('angle', 3700);
+    drive(r, 3600, 6300);
+    r.tap(tap(6300, 6350));
+    expect(r.undecidedApproach()).toBeNull(); // the tap decided it, even before the tick applies it
+    r.tick(6350); // a run-out: stopped at 28 m for the re-attempt
+    expect(r.snapshot()).toMatchObject({ phase: 'stopped', attempt: 2 });
+    expect(r.undecidedApproach()).toBeNull();
+    r.setLine('center', 6400);
+    const restart = driveUntil(r, 6350, (e) => e.type === 'restart');
+    const retry = r.undecidedApproach();
+    expect(retry).toEqual({ fence: 1, attempt: 2, t0: expect.any(Number) });
+    const t0 = nextTick(retry?.t0 ?? 0);
+    drive(r, restart.at, t0);
+    r.tap(tap(t0, t0 + 10, 1, 2));
+    const decidedAt = nextTick(t0 + 10);
+    expect(r.tick(decidedAt)[0]).toMatchObject({ type: 'takeoff', attempt: 2, outcome: { cleared: true } });
+    expect(r.snapshot()).toMatchObject({ phase: 'flight', nextFence: 2 });
+    expect(r.undecidedApproach()).toBeNull(); // in flight: the state already names fence 2, nothing to tap
+    drive(r, decidedAt, decidedAt + RUN.flightMs);
+    expect(r.snapshot()).toMatchObject({ phase: 'running', nextFence: 2 });
+    expect(r.undecidedApproach()).toBeNull();
+  });
+
   it('three falls restart the fence without counting as disobediences; attempt 4 is judged like any other', () => {
     const r = runner();
     r.setGear('gallop', 100); // 7 m/s: the zone opens at 2600, t0 is not a whole number — every moment below comes from the events
