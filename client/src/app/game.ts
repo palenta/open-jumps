@@ -88,7 +88,7 @@ export interface GameDeps {
    * safe-area insets, so its rectangle IS the available area of plan 1.12; a test hands in the rectangle.
    */
   measure?: (element: HTMLElement) => ArenaRect;
-  /** Timers for the lobby polling (injectable for tests). */
+  /** Timers for the lobby polling and the press feedback of the round screen (injectable for tests). */
   timers?: { setTimeout: (fn: () => void, ms: number) => unknown; clearTimeout: (handle: unknown) => void };
 }
 
@@ -217,8 +217,8 @@ interface RoundModules {
  *   are drawn as [data-control="turn-left"|"turn-right"|"gear"|"tap"], absolutely positioned INSIDE the arena with
  *   style left/top/width/height in px of the layout's zones (arena-local coordinates; the arena is
  *   position: relative). [data-arena] receives pointerdown: the finger's clientX/clientY minus the rectangle's
- *   left/top is tested with hitTest → InputController.press(control, pressTime(event.timeStamp, now), now) with now
- *   = clock.now() at handling; a finger outside the rectangle is ignored. The time of a press is the moment of the
+ *   left/top is tested with hitTest → InputController.press(control, pressTime(event.timeStamp, now).time, now) with
+ *   now = clock.now() at handling; a finger outside the rectangle is ignored. The time of a press is the moment of the
  *   touch (audit K1 r3 #4): the event's timeStamp (performance.now() base, the clock's own units in the browser) is
  *   the clientTime of a 'tap' or a 'turn', the moment the turn window is checked against and the moment the instant
  *   hint judges. The turn window opens when the own horse's 'turn-ahead' is handled, at clock.now() then — the same
@@ -254,6 +254,29 @@ interface RoundModules {
  *   The round-side modules (InstantHint, InputController, RemoteInterpolator, RoundClockEstimate) are created
  *   anew at every class-course message, so a new class starts clean (a new round key, an empty buffer: the other
  *   horses are drawn from the new class's samples only, never from the last class's positions).
+ * - round, K1.1 step 3 — what the controls show (every state below is drawn from the controller's own answers:
+ *   InputController.turnWindowOpen, the outcome of InputController.press; game.ts never repeats the controller's
+ *   branches):
+ *   · [data-control="turn-left"] and [data-control="turn-right"] both carry data-window="open" while the own horse's
+ *     turn window is open — set when the own 'turn-ahead' is handled, checked at every HUD update and frame against
+ *     clock.now() (turnWindowOpen), gone at the window's end, at the own 'turn' verdict and when a turn went out. The
+ *     two buttons always look alike: nothing tells the direction of the turn (owner decision 2026-11-03). The button of
+ *     a turn that went out carries data-chosen="true" until the own 'turn' verdict; a line shift or a turn the session
+ *     could not send chooses nothing. Another rider's turn-ahead lights nothing.
+ *   · [data-control="tap"] keeps data-armed="true" and data-takeoff-at (above) — the smoke route times its finger by
+ *     them; the styles give the armed zone a bright fill.
+ *   · Every touch that hits a zone sets data-pressed on that control for 150 ms (a deps.timers timer; a new touch of
+ *     the same control restarts it): "sent" when the press outcome is 'sent', "ignored" for every other outcome. A
+ *     finger outside every zone marks nothing.
+ *   · [data-press-note] (in the HUD) shows for 1.2 s the reason an ignored touch of the tap zone or of a direction
+ *     button did nothing, in the locale: translate('hud.pressNote.<outcome>') for 'not-armed', 'already-tapped',
+ *     'cannot-send' and 'too-old'; nothing for 'not-riding' and 'no-control', and nothing for the pace button. A new
+ *     note replaces the one shown and restarts the 1.2 s. While nothing is to be said the element is empty or hidden.
+ *   · [data-toast] (in the HUD) shows for 1 s what a press that went out changed: translate('hud.toast.gear.<gear>')
+ *     after the pace button, translate('hud.toast.line.<line>') after a line shift; a turn, a tap or a press that did
+ *     not go out shows none. While nothing is to be said the element is empty or hidden.
+ *   · The controls exist on the round screen only: on the walk (and every other screen) none of the four is shown and
+ *     a finger is not handled at all — no message, no data-pressed, no note.
  * - results: once the class table arrived, [data-list="results"] > [data-class] tables with tr[data-id] rows
  *   (resultsModel), [data-action="again"] (host only; sends start-class) and [data-action="leave"]. Before it —
  *   between the heats ('results') and in the moment before the table lands ('done', also for a late joiner who gets

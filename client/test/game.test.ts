@@ -4,7 +4,7 @@
 // happy-dom for the document, a scripted API, a scripted room session, a recording scene, a settable clock and
 // window — and pinned through the DOM contract in game.ts (data attributes, pointerdown on the arena, the
 // lifecycle events, the round modules re-created per class-course).
-import { caption as captionOf, PACKET, type ApproachState, type CourseSpec, type TakeoffOutcome } from '@open-jumps/shared';
+import { caption as captionOf, isMessageKey, PACKET, translateKey, type ApproachState, type CourseSpec, type Locale, type TakeoffOutcome } from '@open-jumps/shared';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   createGame,
@@ -325,20 +325,40 @@ interface Timer {
   handle: number;
   fn: () => void;
   ms: number;
+  /** When it is due on the timers' own time (advance() moves it). */
+  due: number;
 }
 
-/** Timers fired by hand (the lobby polling schedules one poll at a time). */
+/**
+ * Timers fired by hand (the lobby polling schedules one poll at a time): fire() runs the earliest scheduled one;
+ * advance(ms) moves the timers' own time and runs every timer due by then, in the order they fall due (the press
+ * feedback of K1.1 step 3: 150 ms flash, 1.2 s note, 1 s toast).
+ */
 class ManualTimers {
   readonly pending: Timer[] = [];
   readonly cleared: unknown[] = [];
   private nextHandle = 1;
+  private elapsed = 0;
 
   readonly setTimeout = (fn: () => void, ms: number): unknown => {
-    const timer: Timer = { handle: this.nextHandle, fn, ms };
+    const timer: Timer = { handle: this.nextHandle, fn, ms, due: this.elapsed + ms };
     this.nextHandle += 1;
     this.pending.push(timer);
     return timer.handle;
   };
+
+  /** Moves the timers' time on by `ms`, running every timer due by then (also those scheduled meanwhile). */
+  advance(ms: number): void {
+    const until = this.elapsed + ms;
+    for (;;) {
+      const next = [...this.pending].sort((a, b) => a.due - b.due || a.handle - b.handle)[0];
+      if (next === undefined || next.due > until) break;
+      this.pending.splice(this.pending.indexOf(next), 1);
+      this.elapsed = next.due;
+      next.fn();
+    }
+    this.elapsed = until;
+  }
 
   readonly clearTimeout = (handle: unknown): void => {
     this.cleared.push(handle);
@@ -2296,5 +2316,296 @@ describe('the tab lifecycle', () => {
     expect(h.win.removed).toContain('resize');
     expect(h.scene.disposed).toBe(1);
     expect(h.session().leaves).toBe(1);
+  });
+});
+
+// ==== K1.1 playability ==========================================================================================
+
+/** The text of a key that must exist in both locales (a missing key fails here by name, not by an empty element). */
+function localized(locale: Locale, key: string): string {
+  expect(isMessageKey(key), `the message key ${key}`).toBe(true);
+  return translateKey(locale, key);
+}
+
+/** An element is shown: in the document, not hidden by the attribute, not display none. */
+const shown = (element: Element | null): boolean =>
+  element !== null && element.isConnected && !element.hasAttribute('hidden') && (element as HTMLElement).style.display !== 'none';
+
+/** The text of a feedback element while it is shown ('' when it is absent, hidden or empty). */
+const feedback = (h: Harness, selector: string): string => {
+  const element = h.root.querySelector(selector);
+  return shown(element) ? text(element) : '';
+};
+
+const control = (h: Harness, name: Control): HTMLElement => q(h.root, `[data-control="${name}"]`);
+
+/** The own horse's turn-ahead, handled now (the window opens at the clock's reading). */
+const turnAheadOwn = (h: Harness, riderId = 'host'): void =>
+  h.session().emitMessage(roundEvent({ type: 'turn-ahead', riderId, distanceM: 45, at: h.clock.now() + 2_000 }));
+
+/** The server's turn verdict for a horse. */
+const turnVerdict = (h: Harness, riderId = 'host', quality: 'tight' | 'wide' | 'missed' | 'wrong' = 'tight'): void => {
+  const outcome = {
+    tight: { quality: 'tight', stopSec: 0, hardTurn: false, label: 'giro_cerrado' },
+    wide: { quality: 'wide', stopSec: 0, hardTurn: true, label: 'giro_abierto' },
+    missed: { quality: 'missed', stopSec: 4, hardTurn: true, label: 'recto' },
+    wrong: { quality: 'wrong', stopSec: 6, hardTurn: true, label: 'recorrido_equivocado' },
+  }[quality] as Extract<RoundEventWire, { type: 'turn' }>['outcome'];
+  h.session().emitMessage(roundEvent({ type: 'turn', riderId, distanceM: 45, decidedAt: h.clock.now(), outcome }));
+};
+
+describe('the direction buttons light up while the own turn window is open (K1.1 step 3)', () => {
+  const windowOf = (h: Harness, name: Control): string | null => control(h, name).getAttribute('data-window');
+
+  it('after the own turn-ahead both buttons carry data-window="open"; before it neither does', async () => {
+    const h = await inRound();
+    expect(windowOf(h, 'turn-left')).toBeNull();
+    expect(windowOf(h, 'turn-right')).toBeNull();
+    turnAheadOwn(h);
+    expect(windowOf(h, 'turn-left')).toBe('open');
+    expect(windowOf(h, 'turn-right')).toBe('open');
+  });
+
+  it('the light goes with the window: at the frame where the 3.5 s window ends, both buttons are dark again', async () => {
+    const h = await inRound();
+    turnAheadOwn(h);
+    h.clock.t += 3_499;
+    h.game.frame(h.clock.now());
+    expect(windowOf(h, 'turn-left')).toBe('open');
+    h.clock.t += 1;
+    h.game.frame(h.clock.now());
+    expect(windowOf(h, 'turn-left')).toBeNull();
+    expect(windowOf(h, 'turn-right')).toBeNull();
+  });
+
+  it("the own horse's 'turn' verdict puts both lights out", async () => {
+    const h = await inRound();
+    turnAheadOwn(h);
+    turnVerdict(h);
+    h.game.frame(h.clock.now());
+    expect(windowOf(h, 'turn-left')).toBeNull();
+    expect(windowOf(h, 'turn-right')).toBeNull();
+  });
+
+  it("negative: another rider's turn-ahead lights nothing", async () => {
+    const h = await inRound();
+    turnAheadOwn(h, 'ana');
+    h.game.frame(h.clock.now());
+    expect(windowOf(h, 'turn-left')).toBeNull();
+    expect(windowOf(h, 'turn-right')).toBeNull();
+  });
+
+  it('the pressed button carries data-chosen from the turn that went out until the verdict; the window is closed at once', async () => {
+    const h = await inRound();
+    turnAheadOwn(h);
+    h.clock.t += 500;
+    press(h, TURN_RIGHT);
+    expect(h.session().sentOf('turn')).toEqual([{ type: 'turn', choice: 'right', clientTime: h.clock.now() }]);
+    h.game.frame(h.clock.now());
+    expect(control(h, 'turn-right').hasAttribute('data-chosen')).toBe(true);
+    expect(control(h, 'turn-left').hasAttribute('data-chosen')).toBe(false);
+    expect(windowOf(h, 'turn-left')).toBeNull();
+    expect(windowOf(h, 'turn-right')).toBeNull();
+    turnVerdict(h);
+    h.game.frame(h.clock.now());
+    expect(control(h, 'turn-right').hasAttribute('data-chosen')).toBe(false);
+  });
+
+  it('negative: a line shift outside the window and a turn the session could not send choose nothing', async () => {
+    const h = await inRound();
+    press(h, TURN_LEFT); // no window: a line shift
+    expect(control(h, 'turn-left').hasAttribute('data-chosen')).toBe(false);
+    turnAheadOwn(h);
+    h.session().emitStatus('dropped');
+    press(h, TURN_LEFT);
+    h.game.frame(h.clock.now());
+    expect(control(h, 'turn-left').hasAttribute('data-chosen')).toBe(false);
+    expect(windowOf(h, 'turn-left')).toBe('open'); // nothing was spent: the window is still open
+  });
+
+  it('no turn-direction hint (owner decision 2026-11-03): whichever way the course turns, both buttons look the same', async () => {
+    for (const direction of ['left', 'right'] as const) {
+      const h = await hostInLobby();
+      const turning: CourseSpec = { ...course3, turns: [{ distanceM: 45, direction }] };
+      h.session().emitMessage({ type: 'class-course', course: turning, classNumber: 1 });
+      h.session().emitState(ridingState({ riders: { host: rider('host', { positionM: 36 }), ana: rider('ana') } }));
+      await settle();
+      turnAheadOwn(h);
+      h.game.frame(h.clock.now());
+      const attributes = (name: Control): string[] =>
+        [...control(h, name).attributes].map((a) => `${a.name}=${a.name === 'data-control' || a.name === 'class' || a.name === 'style' ? '' : a.value}`).sort();
+      expect(attributes('turn-left'), direction).toEqual(attributes('turn-right'));
+      expect(control(h, 'turn-left').className.replace('control-turn-left', ''), direction).toBe(control(h, 'turn-right').className.replace('control-turn-right', ''));
+      h.game.destroy();
+    }
+  });
+});
+
+describe('every touch of a zone answers (K1.1 step 3)', () => {
+  const pressedOf = (h: Harness, name: Control): string | null => control(h, name).getAttribute('data-pressed');
+
+  it('a tap that went out flashes data-pressed="sent" for 150 ms', async () => {
+    const h = await inApproach();
+    h.clock.t += 1_000;
+    press(h, TAP);
+    expect(pressedOf(h, 'tap')).toBe('sent');
+    h.timers.advance(149);
+    expect(pressedOf(h, 'tap')).toBe('sent');
+    h.timers.advance(1);
+    expect(pressedOf(h, 'tap')).toBeNull();
+  });
+
+  it('a tap that went nowhere (no approach open) dims as data-pressed="ignored" for 150 ms', async () => {
+    const h = await inRound();
+    press(h, TAP);
+    expect(pressedOf(h, 'tap')).toBe('ignored');
+    h.timers.advance(150);
+    expect(pressedOf(h, 'tap')).toBeNull();
+  });
+
+  it('a new touch of the same control restarts its 150 ms: the first touch\'s timer never cuts the second flash short', async () => {
+    const h = await inRound();
+    press(h, TAP);
+    h.timers.advance(100);
+    press(h, TAP);
+    h.timers.advance(100);
+    expect(pressedOf(h, 'tap')).toBe('ignored');
+    h.timers.advance(50);
+    expect(pressedOf(h, 'tap')).toBeNull();
+  });
+
+  it('the pace button and the direction buttons flash too: sent for a gear and a line shift that went out, ignored while the session is dropped', async () => {
+    const h = await inRound();
+    press(h, GEAR);
+    press(h, TURN_LEFT);
+    expect(pressedOf(h, 'gear')).toBe('sent');
+    expect(pressedOf(h, 'turn-left')).toBe('sent');
+    h.timers.advance(150);
+    h.session().emitStatus('dropped');
+    press(h, GEAR);
+    press(h, TURN_RIGHT);
+    expect(pressedOf(h, 'gear')).toBe('ignored');
+    expect(pressedOf(h, 'turn-right')).toBe('ignored');
+  });
+
+  it('negative: a finger outside every zone flashes nothing', async () => {
+    const h = await inRound();
+    press(h, [300, 195]);
+    for (const name of ['turn-left', 'turn-right', 'gear', 'tap'] as const) expect(pressedOf(h, name), name).toBeNull();
+  });
+
+  it("the press note for an early tap: 'not-armed' in the locale, for 1.2 s", async () => {
+    const h = await inRound();
+    press(h, TAP);
+    expect(feedback(h, '[data-press-note]')).toBe(localized('en', 'hud.pressNote.not-armed'));
+    h.timers.advance(1_199);
+    expect(feedback(h, '[data-press-note]')).toBe(localized('en', 'hud.pressNote.not-armed'));
+    h.timers.advance(1);
+    expect(feedback(h, '[data-press-note]')).toBe('');
+  });
+
+  it("the press note for a second tap of the same approach: 'already-tapped'", async () => {
+    const h = await inApproach();
+    h.clock.t += 1_000;
+    press(h, TAP);
+    expect(feedback(h, '[data-press-note]')).toBe(''); // the tap that went out has no note
+    h.clock.t += 50;
+    press(h, TAP);
+    expect(feedback(h, '[data-press-note]')).toBe(localized('en', 'hud.pressNote.already-tapped'));
+  });
+
+  it("the press note for a tap while the session cannot send: 'cannot-send'", async () => {
+    const h = await inApproach();
+    h.session().emitStatus('dropped');
+    press(h, TAP);
+    expect(feedback(h, '[data-press-note]')).toBe(localized('en', 'hud.pressNote.cannot-send'));
+  });
+
+  it("the press note for a touch too old for the judge: 'too-old' — for the tap and for a turn", async () => {
+    const h = await inApproach();
+    h.clock.t += 1_000;
+    press(h, TAP, h.clock.now() - PACKET.maxAgeMs - 1);
+    expect(feedback(h, '[data-press-note]')).toBe(localized('en', 'hud.pressNote.too-old'));
+    h.timers.advance(1_200);
+    turnAheadOwn(h);
+    h.clock.t += 500;
+    press(h, TURN_LEFT, h.clock.now() - PACKET.maxAgeMs - 1);
+    expect(feedback(h, '[data-press-note]')).toBe(localized('en', 'hud.pressNote.too-old'));
+  });
+
+  it('the press note is in the locale of the moment: Spanish', async () => {
+    const h = await inRound();
+    h.game.setLocale('es');
+    press(h, TAP);
+    expect(feedback(h, '[data-press-note]')).toBe(localized('es', 'hud.pressNote.not-armed'));
+    expect(localized('es', 'hud.pressNote.not-armed')).not.toBe(localized('en', 'hud.pressNote.not-armed'));
+  });
+
+  it("negative: no note for 'not-riding' (her horse finished) — the touch still dims", async () => {
+    const h = await inRound();
+    h.session().emitState(ridingState({ riders: { host: rider('host', { status: 'finished' }), ana: rider('ana') } }));
+    press(h, TAP);
+    press(h, TURN_LEFT);
+    expect(pressedOf(h, 'tap')).toBe('ignored');
+    expect(feedback(h, '[data-press-note]')).toBe('');
+    expect(h.session().sent).toEqual([]);
+  });
+
+  it('Pace that went out: a toast with the new gear in the locale, gone after 1 s', async () => {
+    const h = await inRound();
+    press(h, GEAR);
+    expect(feedback(h, '[data-toast]')).toBe(localized('en', 'hud.toast.gear.extended'));
+    h.timers.advance(999);
+    expect(feedback(h, '[data-toast]')).toBe(localized('en', 'hud.toast.gear.extended'));
+    h.timers.advance(1);
+    expect(feedback(h, '[data-toast]')).toBe('');
+    press(h, GEAR);
+    expect(feedback(h, '[data-toast]')).toBe(localized('en', 'hud.toast.gear.gallop'));
+  });
+
+  it('a line shift that went out: a toast with the new line; the shift back toasts the centre', async () => {
+    const h = await inRound();
+    press(h, TURN_LEFT);
+    expect(feedback(h, '[data-toast]')).toBe(localized('en', 'hud.toast.line.angle'));
+    h.timers.advance(1_000);
+    press(h, TURN_RIGHT);
+    expect(feedback(h, '[data-toast]')).toBe(localized('en', 'hud.toast.line.center'));
+  });
+
+  it('negative: no toast for a gear the session could not send, and none for a turn', async () => {
+    const h = await inRound();
+    h.session().emitStatus('dropped');
+    press(h, GEAR);
+    expect(feedback(h, '[data-toast]')).toBe('');
+    h.session().emitStatus('connected');
+    turnAheadOwn(h);
+    press(h, TURN_LEFT);
+    expect(h.session().sentOf('turn')).toHaveLength(1);
+    expect(feedback(h, '[data-toast]')).toBe('');
+  });
+});
+
+describe('the course walk has no controls (K1.1 step 3)', () => {
+  it('on the walk screen none of the four controls is shown', async () => {
+    const h = await inWalk();
+    for (const name of ['turn-left', 'turn-right', 'gear', 'tap'] as const) {
+      expect(shown(h.root.querySelector(`[data-control="${name}"]`)), name).toBe(false);
+    }
+  });
+
+  it('a touch where Jump! would be sends nothing and flashes nothing', async () => {
+    const h = await inWalk();
+    press(h, TAP);
+    press(h, GEAR);
+    expect(h.session().sent).toEqual([]);
+    expect(h.root.querySelector('[data-pressed]')).toBeNull();
+  });
+
+  it('negative: once the round begins the four controls are shown again', async () => {
+    const h = await inWalk();
+    h.session().emitState(ridingState());
+    await settle();
+    expect(h.root.dataset.screen).toBe('round');
+    for (const name of ['turn-left', 'turn-right', 'gear', 'tap'] as const) expect(shown(control(h, name)), name).toBe(true);
   });
 });
