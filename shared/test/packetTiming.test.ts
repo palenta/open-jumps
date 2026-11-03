@@ -130,17 +130,42 @@ describe('AttemptJudge: the deadline boundary and processing order (plan 2.3)', 
     expect(judge.decision).toEqual({ decided: true, offsetMs: null, decidedAt: t0 + 700 });
   });
 
-  it('submitting a packet not later than the last tick violates the ordering contract and throws', () => {
+  it('a packet stamped earlier than the last tick violates the ordering contract and throws; one stamped AT the last tick is accepted', () => {
     const judge = new AttemptJudge(t0, 3, 1);
     judge.tick(t0 + 650);
-    expect(() => judge.submit(packet(t0 + 400, t0 + 650))).toThrow(/order/);
     expect(() => judge.submit(packet(t0 + 300, t0 + 640))).toThrow(/order/);
-    expect(judge.submit(packet(t0 + 400, t0 + 651)).verdict).toEqual({ accepted: true, offsetMs: 400 });
+    expect(judge.decision).toEqual({ decided: false });
+    // The same millisecond as the last tick, later in the event loop: processed with its true times.
+    const same = judge.submit(packet(t0 + 400, t0 + 650));
+    expect(same.verdict).toEqual({ accepted: true, offsetMs: 400 });
+    expect(same.decision).toEqual({ decided: true, offsetMs: 400, decidedAt: t0 + 650 });
+    expect(judge.submit(packet(t0 + 400, t0 + 651)).verdict).toEqual({ accepted: false, reason: 'duplicate' });
   });
 
-  it('the same rule at the deadline itself: tick(t0+700) first, then a packet stamped t0+700 is an ordering error, not a lost tap', () => {
+  it('the age rule is applied to the true times of a packet stamped at the last tick: age exactly 300 is accepted, 301 is too old', () => {
+    const exact = new AttemptJudge(t0, 3, 1);
+    exact.tick(t0 + 300);
+    const result = exact.submit(packet(t0, t0 + 300));
+    expect(result.verdict).toEqual({ accepted: true, offsetMs: 0 });
+    expect(result.decision).toEqual({ decided: true, offsetMs: 0, decidedAt: t0 + 300 });
+
+    const stampedLater = new AttemptJudge(t0, 3, 1);
+    stampedLater.tick(t0 + 300);
+    expect(stampedLater.submit(packet(t0, t0 + 301)).verdict).toEqual({ accepted: false, reason: 'too-old' });
+    expect(stampedLater.decision).toEqual({ decided: false });
+
+    const olderAction = new AttemptJudge(t0, 3, 1);
+    olderAction.tick(t0 + 300);
+    expect(olderAction.submit(packet(t0 - 1, t0 + 300)).verdict).toEqual({ accepted: false, reason: 'too-old' });
+    expect(olderAction.decision).toEqual({ decided: false });
+  });
+
+  it('defensive only (the engine never ticks a millisecond that may still deliver packets): if tick(t0+700) had already fixed "no tap", a packet stamped t0+700 is reported a duplicate instead of crashing', () => {
     const judge = new AttemptJudge(t0, 3, 1);
-    judge.tick(t0 + 700);
-    expect(() => judge.submit(packet(t0 + 400, t0 + 700))).toThrow(/order/);
+    expect(judge.tick(t0 + 700)).toEqual({ decided: true, offsetMs: null, decidedAt: t0 + 700 });
+    let result: ReturnType<AttemptJudge['submit']> | undefined;
+    expect(() => { result = judge.submit(packet(t0 + 400, t0 + 700)); }).not.toThrow();
+    expect(result?.verdict).toEqual({ accepted: false, reason: 'duplicate' });
+    expect(judge.decision).toEqual({ decided: true, offsetMs: null, decidedAt: t0 + 700 });
   });
 });

@@ -3,7 +3,7 @@
 import { EMOTES } from '@open-jumps/shared';
 import { describe, expect, it } from 'vitest';
 import { RoomAdmission } from '../src/rooms/admission.js';
-import { HOST_ONLY_MESSAGES, MESSAGE_LIMITS, authorizeRoomMessage, validateRoomMessage } from '../src/rooms/authz.js';
+import { MESSAGE_NUMBER_LIMITS, RIDER_ONLY_MESSAGES, HOST_ONLY_MESSAGES, MESSAGE_LIMITS, authorizeRoomMessage, validateRoomMessage } from '../src/rooms/authz.js';
 
 describe('validateRoomMessage', () => {
   it('accepts well-formed messages of every type', () => {
@@ -98,5 +98,61 @@ describe('authorizeRoomMessage', () => {
     expect(room.hostId).toBe('member');
     expect(authorizeRoomMessage(room, 'member', { type: 'admit', accountId: 'pending' })).toEqual({ ok: true, value: undefined });
     expect(authorizeRoomMessage(room, 'host', { type: 'admit', accountId: 'pending' })).toEqual({ ok: false, error: 'not-participant' });
+  });
+});
+
+describe('part B2: rider commands and lobby settings', () => {
+  const valid = [
+    { type: 'tap', clientTime: 1_700_000_000_000, fence: 1, attempt: 1 },
+    { type: 'tap', clientTime: 1_700_000_000_000, fence: 12, attempt: 4 }, // attempt 4 is legal: three falls do not eliminate
+    { type: 'turn', choice: 'left', clientTime: 1_700_000_000_000 },
+    { type: 'turn', choice: 'straight', clientTime: 5 },
+    { type: 'gear', gear: 'gallop' },
+    { type: 'line', line: 'angle' },
+    { type: 'height', heightClass: 70 },
+    { type: 'assists', schoolmaster: true, widerWindow: false },
+    { type: 'clock-pong', serverSent: 1000, clientTime: 1500 },
+  ];
+  const malformed = [
+    { type: 'tap', clientTime: 'now', fence: 1, attempt: 1 },
+    { type: 'tap', clientTime: 1, fence: 0, attempt: 1 },
+    { type: 'tap', clientTime: 1, fence: 13, attempt: 1 },
+    { type: 'tap', clientTime: 1, fence: 1, attempt: 0 },
+    { type: 'tap', clientTime: 1, fence: 1, attempt: 1.5 },
+    { type: 'tap', clientTime: Number.NaN, fence: 1, attempt: 1 },
+    { type: 'tap', clientTime: 1, fence: 1 },
+    { type: 'tap', clientTime: 1, fence: 1, attempt: 1, riderId: 'someone-else' },
+    { type: 'turn', choice: 'back', clientTime: 1 },
+    { type: 'gear', gear: 'warp' },
+    { type: 'line', line: 'left' },
+    { type: 'height', heightClass: 65 },
+    { type: 'height', heightClass: '70' },
+    { type: 'assists', schoolmaster: 'yes', widerWindow: false },
+    { type: 'assists', schoolmaster: true },
+    { type: 'clock-pong', serverSent: 1000 },
+    { type: 'clock-pong', serverSent: Number.POSITIVE_INFINITY, clientTime: 1 },
+  ];
+
+  it('accepts well-formed rider commands, settings and clock answers; strings are exact, numbers finite and bounded', () => {
+    for (const raw of valid) expect(validateRoomMessage(raw)).toEqual({ ok: true, value: raw });
+    expect(MESSAGE_NUMBER_LIMITS).toEqual({ maxFence: 12 }); // no cap on the attempt number: the server checks the current attempt
+    expect([...RIDER_ONLY_MESSAGES].sort()).toEqual(['gear', 'line', 'tap', 'turn']);
+  });
+
+  it('rejects malformed ones (a horse id in the payload is malformed: commands are always about the sender\'s own horse)', () => {
+    for (const raw of malformed) expect(validateRoomMessage(raw)).toEqual({ ok: false, error: 'malformed' });
+  });
+
+  it('rider commands and settings are participant messages, never host-only', () => {
+    const admission = new RoomAdmission({ hostId: 'host', clubId: null });
+    admission.requestJoin('bea', { confirmedClubMember: false });
+    admission.admit('host', 'bea');
+    for (const raw of valid) {
+      const message = validateRoomMessage(raw);
+      if (!message.ok) throw new Error('valid message expected');
+      expect(authorizeRoomMessage(admission, 'bea', message.value)).toEqual({ ok: true, value: undefined });
+      expect(authorizeRoomMessage(admission, 'stranger', message.value)).toEqual({ ok: false, error: 'not-participant' });
+      expect(HOST_ONLY_MESSAGES.has(message.value.type)).toBe(false);
+    }
   });
 });

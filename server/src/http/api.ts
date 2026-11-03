@@ -25,6 +25,16 @@ export interface ApiDeps {
   clubs: ClubService;
   rooms: RoomDirectory;
   config: ApiConfig;
+  /**
+   * Part B2: the live (Colyseus) side of a room. createApp wires it to the match maker; without it (unit tests)
+   * rooms exist only in the directory and responses carry no roomId.
+   */
+  liveRooms?: {
+    /** Create the live room for a code; returns the Colyseus room id to join with. */
+    create(code: string): Promise<string>;
+    /** The live room id of an open code, if any. */
+    idOf(code: string): string | undefined;
+  };
 }
 
 export type RequestHandler = (req: IncomingMessage, res: ServerResponse) => Promise<void>;
@@ -128,9 +138,9 @@ const DOOR_ACTIONS: ReadonlySet<string> = new Set(['admit', 'deny', 'kick', 'unb
  *  POST  /api/clubs/:id/reject/:accountId     admin → 204 | 403
  *  POST  /api/clubs/:id/remove/:accountId     admin → 204 | 403
  *  POST  /api/clubs/:id/transfer/:accountId   admin → 200 { adminAccountId } | 403
- *  POST  /api/rooms                           { autoAdmitClub? } → 201 { code } (club = the host's club)
+ *  POST  /api/rooms                           { autoAdmitClub? } → 201 { code, roomId? } (club = the host's club; roomId with liveRooms)
  *  POST  /api/rooms/:code/join                → 200 { status, reason? } | 404 | 429 rate-limited (keyed by account)
- *  GET   /api/rooms/:code/status              → 200 { status } (own relation to the room: host/admitted/pending/kicked)
+ *  GET   /api/rooms/:code/status              → 200 { status, roomId? } (own relation: host/admitted/pending/kicked; roomId only for host/admitted with liveRooms)
  *  GET   /api/rooms/:code/lobby               host → 200 LobbyView (people = PublicProfile + club { id, name } | null) | 403
  *  Every /api/rooms/:code/* route answers 404 unknown-code for a room the account has no relation to (never seen
  *  there, or denied) and spends one of the account's five guesses per minute; the sixth guess → 429 on all of them.
@@ -143,7 +153,7 @@ const DOOR_ACTIONS: ReadonlySet<string> = new Set(['admit', 'deny', 'kick', 'unb
  * State-changing requests without an allowed Origin → 403 bad-origin; unknown routes → 404; bad JSON → 400.
  */
 export function createApi(deps: ApiDeps): RequestHandler {
-  const { accounts, sessions, clubs, rooms, config } = deps;
+  const { accounts, sessions, clubs, rooms, config, liveRooms } = deps;
   const cookieOptions = { secure: config.secureCookies, maxAgeSec: Math.floor(SESSION.ttlMs / 1000) };
   const signedIn = (res: ServerResponse, token: string) => res.setHeader('Set-Cookie', sessionCookie(token, cookieOptions));
 
@@ -312,7 +322,10 @@ export function createApi(deps: ApiDeps): RequestHandler {
       if (p2 === undefined && method === 'POST') {
         const autoAdmitClub = bool(body, 'autoAdmitClub');
         const entry = rooms.createRoom(viewer.id, { clubId: viewer.clubId, ...(autoAdmitClub !== undefined ? { autoAdmitClub } : {}) });
-        return reply(201, { code: entry.code });
+        // Part B2: the live room is created with the code, so the host can join by roomId at once.
+        if (!liveRooms) return reply(201, { code: entry.code });
+        const roomId = await liveRooms.create(entry.code);
+        return reply(201, { code: entry.code, roomId });
       }
       if (p2 === undefined) return failure(404, 'not-found');
       const code = p2;
@@ -322,7 +335,10 @@ export function createApi(deps: ApiDeps): RequestHandler {
       }
       if (p3 === 'status' && p4 === undefined && method === 'GET') {
         const status = rooms.statusOf(code, viewer.id);
-        return status === 'unknown-code' || status === 'rate-limited' ? failure(statusFor(status), status) : reply(200, { status });
+        if (status === 'unknown-code' || status === 'rate-limited') return failure(statusFor(status), status);
+        // Part B2: only someone who may connect (host, admitted) learns the live room id; a pending one does not.
+        const roomId = status === 'host' || status === 'admitted' ? liveRooms?.idOf(code) : undefined;
+        return reply(200, roomId === undefined ? { status } : { status, roomId });
       }
       if (p3 === 'lobby' && p4 === undefined && method === 'GET') {
         const result = await rooms.lobbyView(code, viewer.id);

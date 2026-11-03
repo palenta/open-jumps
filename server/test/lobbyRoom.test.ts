@@ -28,7 +28,7 @@ let services: Services;
 
 beforeAll(async () => {
   services = buildServices();
-  LobbyRoom.configure({ sessions: services.sessions, accounts: services.accounts, rooms: services.rooms, allowedOrigins: [ORIGIN] });
+  LobbyRoom.configure({ sessions: services.sessions, accounts: services.accounts, rooms: services.rooms, allowedOrigins: [ORIGIN], results: services.repos.results });
   const gameServer = new Server({ transport: new WebSocketTransport({ beforeUpgrade: createUpgradeGuard([ORIGIN]) }) });
   gameServer.define(LOBBY_ROOM_NAME, LobbyRoom);
   // @colyseus/testing 0.18.6 boot(server, port) ignores `port` for a ready-made Server (listens on 2567):
@@ -77,7 +77,8 @@ describe('signing in to the live room', () => {
     await room.waitForNextPatch();
     expect(room.clients).toHaveLength(1);
     const state = client.state.toJSON() as Record<string, unknown>;
-    expect(Object.keys(state).sort()).toEqual(['code', 'entryOpen', 'hostId', 'participants', 'pendingCount']);
+    // B2 added the class fields (phase, heatIndex, roundClockMs, riders); still no names of those waiting at the door.
+    expect(Object.keys(state).sort()).toEqual(['code', 'entryOpen', 'heatIndex', 'hostId', 'participants', 'pendingCount', 'phase', 'riders', 'roundClockMs']);
     expect(state.hostId).toBe(host.account.id);
     const participants = state.participants as Record<string, Record<string, unknown>>;
     expect(Object.keys(participants)).toEqual([host.account.id]);

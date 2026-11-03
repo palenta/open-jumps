@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
 import { createMemoryRepositories } from '../src/storage/memory.js';
+import type { ResultRecord } from '../src/storage/repositories.js';
 import { createSqliteRepositories } from '../src/storage/sqlite.js';
 import { repositoryContract } from './repositoryContract.js';
 
@@ -53,6 +54,64 @@ describe('sqlite on disk', () => {
       expect(await second.clubs.getMembership('club-1', 'acc-1')).toEqual(member);
       expect(await second.clubs.getMembership('club-1', 'acc-2')).toEqual(pending);
       expect((await second.clubs.listMemberships('club-1', 'pending')).map((m) => m.accountId)).toEqual(['acc-2']);
+    } finally {
+      await second.close();
+    }
+  });
+
+  it('keeps a round result — its seed exactly — across close and reopen, and still refuses a second row for the same (round, rider), even under another seed (plans 2.3, 2.5)', async () => {
+    const path = join(dir, 'results.sqlite');
+    const first = createSqliteRepositories(path);
+    const account = {
+      id: 'acc-1',
+      riderName: 'María',
+      riderNameKey: 'maria',
+      riderGender: 'girl' as const,
+      ponyName: 'Dakota',
+      ponyGender: 'yegua' as const,
+      ponyCategory: 'C' as const,
+      pinHash: 'scrypt$salt$hash',
+      sessionGeneration: 1,
+      failedLogins: 0,
+      lockedUntil: null,
+      clubId: null,
+      createdAt: 1000,
+    };
+    const result: ResultRecord = {
+      roundId: 'round-1',
+      accountId: 'acc-1',
+      courseId: 'course-1',
+      courseVersion: 2,
+      rulesVersion: 1,
+      heightClass: 60,
+      faults: 4,
+      timeMs: 58_430,
+      status: 'finished',
+      eliminationReason: null,
+      autopilot: false,
+      schoolmaster: true,
+      mode: 'ranked',
+      // The round seed (plan 2.3) is part of the stored result; it must come back byte for byte.
+      seed: 'round-1|5eed-0f-the-r0und',
+      recordedAt: 1_700_000_123_456,
+    };
+    await first.accounts.create(account);
+    expect(await first.results.insertOnce(result)).toBe(true);
+    await first.close();
+
+    const second = createSqliteRepositories(path);
+    try {
+      expect(await second.results.get('round-1', 'acc-1')).toEqual(result);
+      expect((await second.results.get('round-1', 'acc-1'))?.seed).toBe('round-1|5eed-0f-the-r0und');
+      expect(await second.results.listByRound('round-1')).toEqual([result]);
+      expect(await second.results.listByAccount('acc-1')).toEqual([result]);
+      // The uniqueness of (roundId, accountId) is a property of the stored data, not of one process's memory.
+      expect(await second.results.insertOnce({ ...result, faults: 0, timeMs: 40_000, recordedAt: 1_700_000_999_999 })).toBe(false);
+      expect(await second.results.get('round-1', 'acc-1')).toEqual(result);
+      // A different seed does not make it a different result: the pair is the key, and the first seed stays.
+      expect(await second.results.insertOnce({ ...result, seed: 'round-1|another-seed', recordedAt: 1_700_001_000_000 })).toBe(false);
+      expect((await second.results.get('round-1', 'acc-1'))?.seed).toBe('round-1|5eed-0f-the-r0und');
+      expect(await second.results.get('round-1', 'acc-1')).toEqual(result);
     } finally {
       await second.close();
     }

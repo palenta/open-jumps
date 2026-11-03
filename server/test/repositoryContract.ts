@@ -1,6 +1,6 @@
 // The contract every repository implementation must satisfy (memory and SQLite run the same suite).
 import { describe, expect, it } from 'vitest';
-import type { AccountRecord, ClubRecord, MembershipRecord, Repositories, SessionRecord } from '../src/storage/repositories.js';
+import type { AccountRecord, ClubRecord, MembershipRecord, Repositories, ResultRecord, SessionRecord } from '../src/storage/repositories.js';
 
 const account = (over: Partial<AccountRecord> = {}): AccountRecord => ({
   id: 'acc-1',
@@ -44,6 +44,26 @@ const membership = (over: Partial<MembershipRecord> = {}): MembershipRecord => (
   status: 'pending',
   requestedAt: 1000,
   confirmedAt: null,
+  ...over,
+});
+
+const result = (over: Partial<ResultRecord> = {}): ResultRecord => ({
+  roundId: 'round-1',
+  accountId: 'acc-1',
+  courseId: 'course-1',
+  courseVersion: 1,
+  rulesVersion: 1,
+  heightClass: 70,
+  faults: 4,
+  timeMs: 61_250,
+  status: 'finished',
+  eliminationReason: null,
+  autopilot: false,
+  schoolmaster: false,
+  mode: 'ranked',
+  // The round seed (plan 2.3): stored with the result so its chance outcomes stay reproducible.
+  seed: 'round-1|a3f9c2e1',
+  recordedAt: 1000,
   ...over,
 });
 
@@ -123,6 +143,90 @@ export function repositoryContract(name: string, open: () => Promise<Repositorie
         expect(await repos.clubs.listMemberships('club-1', 'pending')).toHaveLength(0);
         await repos.clubs.deleteMembership('club-1', 'acc-2');
         expect(await repos.clubs.getMembership('club-1', 'acc-2')).toBeNull();
+      } finally {
+        await repos.close();
+      }
+    });
+
+    // Results (plan 2.5): one row per (roundId, accountId), never a second one — the first write wins.
+    it('results: insertOnce stores the first row per (roundId, accountId) and refuses a second one even with different fields; get returns every field, the seed exactly', async () => {
+      const repos = await open();
+      try {
+        await repos.accounts.create(account());
+        await repos.accounts.create(account({ id: 'acc-2', riderName: 'Sofía', riderNameKey: 'sofia' }));
+        expect(await repos.results.insertOnce(result())).toBe(true);
+        expect(await repos.results.get('round-1', 'acc-1')).toEqual(result());
+        expect((await repos.results.get('round-1', 'acc-1'))?.seed).toBe('round-1|a3f9c2e1');
+        // A retry with other numbers (a late duplicate from the room) is refused and leaves the first row untouched.
+        expect(await repos.results.insertOnce(result({ faults: 0, timeMs: 50_000, recordedAt: 2000 }))).toBe(false);
+        expect(await repos.results.get('round-1', 'acc-1')).toEqual(result());
+        // A retry under a different seed is still the same (round, rider) pair: refused, and the first seed stays (plan 2.3).
+        expect(await repos.results.insertOnce(result({ seed: 'round-1|ffffffff', faults: 0, recordedAt: 3000 }))).toBe(false);
+        expect(await repos.results.get('round-1', 'acc-1')).toEqual(result());
+        expect((await repos.results.get('round-1', 'acc-1'))?.seed).toBe('round-1|a3f9c2e1');
+        // The key is the pair: the same rider in another round, and another rider in the same round, both insert —
+        // each row keeps its own seed.
+        expect(await repos.results.insertOnce(result({ roundId: 'round-2', seed: 'round-2|0badf00d', recordedAt: 2000 }))).toBe(true);
+        expect(await repos.results.insertOnce(result({ accountId: 'acc-2', recordedAt: 2000 }))).toBe(true);
+        expect((await repos.results.get('round-2', 'acc-1'))?.seed).toBe('round-2|0badf00d');
+        expect((await repos.results.get('round-1', 'acc-2'))?.seed).toBe('round-1|a3f9c2e1');
+        expect(await repos.results.get('round-1', 'nope')).toBeNull();
+        expect(await repos.results.get('nope', 'acc-1')).toBeNull();
+      } finally {
+        await repos.close();
+      }
+    });
+
+    it('results: an eliminated rider (disconnected, autopilot, schoolmaster, training) round-trips with timeMs null', async () => {
+      const repos = await open();
+      try {
+        await repos.accounts.create(account());
+        const eliminated = result({
+          heightClass: 50,
+          faults: 8,
+          timeMs: null,
+          status: 'eliminated',
+          eliminationReason: 'disconnected',
+          autopilot: true,
+          schoolmaster: true,
+          mode: 'training',
+          seed: 'round-1|training-7e3',
+        });
+        expect(await repos.results.insertOnce(eliminated)).toBe(true);
+        expect(await repos.results.get('round-1', 'acc-1')).toEqual(eliminated);
+        expect(await repos.results.listByRound('round-1')).toEqual([eliminated]);
+        expect(await repos.results.listByAccount('acc-1')).toEqual([eliminated]);
+      } finally {
+        await repos.close();
+      }
+    });
+
+    it('results: listByRound returns only that round; listByAccount returns only that rider, newest first by recordedAt', async () => {
+      const repos = await open();
+      try {
+        await repos.accounts.create(account());
+        await repos.accounts.create(account({ id: 'acc-2', riderName: 'Sofía', riderNameKey: 'sofia' }));
+        // Inserted out of time order on purpose: the order must come from recordedAt, not from insertion.
+        await repos.results.insertOnce(result({ roundId: 'round-1', accountId: 'acc-1', recordedAt: 3000 }));
+        await repos.results.insertOnce(result({ roundId: 'round-2', accountId: 'acc-1', recordedAt: 1000 }));
+        await repos.results.insertOnce(result({ roundId: 'round-1', accountId: 'acc-2', recordedAt: 1500, faults: 0 }));
+        await repos.results.insertOnce(result({ roundId: 'round-3', accountId: 'acc-1', recordedAt: 2000 }));
+
+        const round1 = (await repos.results.listByRound('round-1')).sort((x, y) => x.accountId.localeCompare(y.accountId));
+        expect(round1).toEqual([
+          result({ roundId: 'round-1', accountId: 'acc-1', recordedAt: 3000 }),
+          result({ roundId: 'round-1', accountId: 'acc-2', recordedAt: 1500, faults: 0 }),
+        ]);
+        expect(await repos.results.listByRound('round-2')).toEqual([result({ roundId: 'round-2', accountId: 'acc-1', recordedAt: 1000 })]);
+        expect(await repos.results.listByRound('round-none')).toEqual([]);
+
+        expect((await repos.results.listByAccount('acc-1')).map((r) => [r.roundId, r.recordedAt])).toEqual([
+          ['round-1', 3000],
+          ['round-3', 2000],
+          ['round-2', 1000],
+        ]);
+        expect(await repos.results.listByAccount('acc-2')).toEqual([result({ roundId: 'round-1', accountId: 'acc-2', recordedAt: 1500, faults: 0 })]);
+        expect(await repos.results.listByAccount('nope')).toEqual([]);
       } finally {
         await repos.close();
       }

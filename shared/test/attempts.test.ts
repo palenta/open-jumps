@@ -153,3 +153,43 @@ describe('finishing', () => {
     expect(r.eliminationReason).toBe('time');
   });
 });
+
+describe('withdrawal: the rider left the room or never came back after a disconnection', () => {
+  it('withdraw("disconnected") while riding eliminates with that reason; faults, entries and position stay as they were', () => {
+    const r = new RiderRound(8);
+    r.recordOutcome(chip);
+    r.recordOutcome(refusal);
+    const entriesBefore = r.entries;
+    r.withdraw('disconnected');
+    expect(r.status).toBe('eliminated');
+    expect(r.eliminationReason).toBe('disconnected');
+    expect(r.faults).toBe(8);
+    expect(r.entries).toEqual(entriesBefore);
+    expect(r.entries).toHaveLength(2);
+    expect(r.currentFence).toBe(2);
+    expect(r.currentAttempt).toBe(2);
+  });
+
+  it('after a withdrawal the round is over: recordOutcome, finish and withdraw all throw', () => {
+    const r = new RiderRound(1);
+    r.withdraw('disconnected');
+    expect(() => r.recordOutcome(clean)).toThrow(/eliminated/);
+    expect(() => r.finish(30, 60)).toThrow(/eliminated/);
+    expect(() => r.withdraw('disconnected')).toThrow(/eliminated/);
+  });
+
+  it('a rider already eliminated by time cannot be withdrawn', () => {
+    const r = new RiderRound(8);
+    r.timeOut();
+    expect(() => r.withdraw('disconnected')).toThrow(/eliminated/);
+    expect(r.eliminationReason).toBe('time');
+  });
+
+  it('a rider who has finished cannot be withdrawn', () => {
+    const r = new RiderRound(1);
+    r.recordOutcome(clean);
+    r.finish(30, 60);
+    expect(() => r.withdraw('disconnected')).toThrow(/finished/);
+    expect(r.status).toBe('finished');
+  });
+});

@@ -204,6 +204,33 @@ describe('one club per rider under concurrency (both storage adapters)', () => {
       }
     });
 
+    // Codex P3 regression, the mirror of the case above: the per-club lock queues calls in arrival order, so
+    // starting the transfer first must deterministically make it win; the removal then runs after A has
+    // stopped being the admin and is refused as forbidden — the new admin is never removed from their own club.
+    it(`${name}: handing a member the admin role while removing them (transfer started first) → the transfer wins; the removal is forbidden`, async () => {
+      const { s, adminA, rider, a } = await twoClubs(open());
+      try {
+        await s.clubs.requestJoin(rider.id, a.code);
+        await s.clubs.confirm(adminA.id, a.id, rider.id);
+        const [transferred, removed] = await Promise.all([s.clubs.transferAdmin(adminA.id, a.id, rider.id), s.clubs.removeMember(adminA.id, a.id, rider.id)]);
+        expect(transferred.ok && transferred.value.adminAccountId).toBe(rider.id);
+        expect(removed).toEqual({ ok: false, error: 'forbidden' });
+        expect((await s.repos.clubs.getById(a.id))?.adminAccountId).toBe(rider.id);
+        // The new admin is a confirmed member whose profile points at the club; the old admin stays a member.
+        expect(await s.clubs.isConfirmedMember(a.id, rider.id)).toBe(true);
+        expect((await s.repos.accounts.getById(rider.id))?.clubId).toBe(a.id);
+        expect(await s.clubs.confirmedClubOf(rider.id)).toEqual({ id: a.id, name: a.name });
+        expect(await s.clubs.isConfirmedMember(a.id, adminA.id)).toBe(true);
+        expect((await s.repos.accounts.getById(adminA.id))?.clubId).toBe(a.id);
+        const asNewAdmin = await s.clubs.overview(rider.id);
+        expect(asNewAdmin.ok && asNewAdmin.value).toMatchObject({ id: a.id, role: 'admin', code: a.code });
+        const asOldAdmin = await s.clubs.overview(adminA.id);
+        expect(asOldAdmin.ok && asOldAdmin.value).toMatchObject({ id: a.id, role: 'member', code: null });
+      } finally {
+        await s.repos.close();
+      }
+    });
+
     it(`${name}: two simultaneous transfers to different members → exactly one new admin`, async () => {
       const { s, adminA, adminB, rider, a } = await twoClubs(open());
       try {

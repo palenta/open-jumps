@@ -9,7 +9,8 @@ import {
   schoolmasterTapOffset,
   type RoundRules,
 } from '../src/rules/assists.js';
-import { RANKED_NO_ASSISTS, judgeAttempt, windowForAttempt } from '../src/rules/judging.js';
+import * as shared from '../src/index.js';
+import { RANKED_NO_ASSISTS, RULES_VERSION, judgeAttempt, windowForAttempt } from '../src/rules/judging.js';
 import { BASE_WINDOW, NO_TAP_LIMIT_MS, judgeTakeoff, takeoffWindow, type ApproachState } from '../src/rules/takeoff.js';
 
 const good = (over: Partial<ApproachState> = {}): ApproachState => ({
@@ -108,5 +109,16 @@ describe('schoolmaster with both assists on in training still never scores perfe
     const { outcome } = ride(good({ spooked: true }), trainingBoth, () => 0.999999);
     expect(['chip', 'long']).toContain(outcome.kind);
     expect(outcome.faults).toBe(4);
+  });
+});
+
+describe('RULES_VERSION (plan 2.5): stored with every result so records of different rule sets never mix', () => {
+  it('is 1', () => {
+    expect(RULES_VERSION).toBe(1);
+  });
+
+  it('is exported from the package index', () => {
+    expect(shared).toHaveProperty('RULES_VERSION', 1);
+    expect(shared.RULES_VERSION).toBe(RULES_VERSION);
   });
 });

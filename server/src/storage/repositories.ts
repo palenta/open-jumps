@@ -1,5 +1,5 @@
 // Storage contracts (plan 2.3 "Хранение и вход"): small records, no images, PINs only as hashes.
-import type { PonyCategory } from '@open-jumps/shared';
+import type { EliminationReason, HeightClass, PonyCategory, RiderStatus } from '@open-jumps/shared';
 
 export type RiderGender = 'girl' | 'boy';
 export type PonyGender = 'yegua' | 'macho';
@@ -85,10 +85,42 @@ export interface ClubRepository {
   listMemberships(clubId: string, status?: MembershipStatus): Promise<MembershipRecord[]>;
 }
 
+/** A rider's result of one round (plan 2.5): one row per (roundId, accountId), never a second one. */
+export interface ResultRecord {
+  roundId: string;
+  accountId: string;
+  courseId: string;
+  courseVersion: number;
+  rulesVersion: number;
+  heightClass: HeightClass;
+  faults: number;
+  /** Time on course in ms; null when eliminated. */
+  timeMs: number | null;
+  status: RiderStatus;
+  eliminationReason: EliminationReason | null;
+  /** "con autopiloto": excluded from leaderboards and career (plan 2.3). */
+  autopilot: boolean;
+  schoolmaster: boolean;
+  mode: 'ranked' | 'training';
+  /** The round seed (plan 2.3): chance outcomes of the stored result stay reproducible. */
+  seed: string;
+  recordedAt: number;
+}
+
+export interface ResultRepository {
+  /** Insert unless a row with the same (roundId, accountId) exists; returns whether it was inserted. */
+  insertOnce(record: ResultRecord): Promise<boolean>;
+  get(roundId: string, accountId: string): Promise<ResultRecord | null>;
+  listByRound(roundId: string): Promise<ResultRecord[]>;
+  /** Newest first. */
+  listByAccount(accountId: string): Promise<ResultRecord[]>;
+}
+
 export interface Repositories {
   accounts: AccountRepository;
   sessions: SessionRepository;
   clubs: ClubRepository;
+  results: ResultRepository;
   /** Release resources (close the database). */
   close(): Promise<void>;
 }

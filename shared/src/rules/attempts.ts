@@ -104,6 +104,12 @@ export class RiderRound {
     this.eliminate('time');
   }
 
+  /** The rider is withdrawn while still riding (left the room, or never came back after a disconnection). */
+  withdraw(reason: 'disconnected'): void {
+    this.assertRiding();
+    this.eliminate(reason);
+  }
+
   private add(kind: FaultEntry['kind'], faults: number, label: string): void {
     this.total += faults;
     this.log.push({ fence: this.fence, attempt: this.attempt, kind, faults, label });

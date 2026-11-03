@@ -3,6 +3,9 @@
 import { effectiveWindow, freezeForRound, type RoundRules } from './assists.js';
 import { judgeWithWindow, takeoffWindow, type ApproachState, type TakeoffOutcome, type TakeoffWindow } from './takeoff.js';
 
+/** Version of the judging rules (windows, outcome table); stored with every result so records never mix (plan 2.5). */
+export const RULES_VERSION = 1;
+
 /** A ranked round without assists: the plain approach window (what judgeTakeoff uses). */
 export const RANKED_NO_ASSISTS: RoundRules = {
   mode: 'ranked',

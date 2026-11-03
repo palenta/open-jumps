@@ -5,10 +5,12 @@ import type {
   MembershipRecord,
   MembershipStatus,
   Repositories,
+  ResultRecord,
   SessionRecord,
 } from './repositories.js';
 
 const membershipKey = (clubId: string, accountId: string): string => `${clubId}\u0000${accountId}`;
+const resultKey = (roundId: string, accountId: string): string => `${roundId}\u0000${accountId}`;
 
 /** Records are copied on the way in and out so callers never share state with the store. */
 const copy = <T extends object>(record: T | undefined): T | null => (record ? { ...record } : null);
@@ -18,6 +20,7 @@ export function createMemoryRepositories(): Repositories {
   const sessions = new Map<string, SessionRecord>();
   const clubs = new Map<string, ClubRecord>();
   const memberships = new Map<string, MembershipRecord>();
+  const results = new Map<string, ResultRecord>();
 
   const findAccountByNameKey = (nameKey: string): AccountRecord | undefined =>
     [...accounts.values()].find((a) => a.riderNameKey === nameKey);
@@ -114,6 +117,30 @@ export function createMemoryRepositories(): Repositories {
           .filter((m) => m.clubId === clubId && (status === undefined || m.status === status))
           .sort((a, b) => a.requestedAt - b.requestedAt || a.accountId.localeCompare(b.accountId))
           .map((m) => ({ ...m }));
+      },
+    },
+    // Results (plan 2.5): the pair (roundId, accountId) is the key; the first row written is the one kept.
+    results: {
+      async insertOnce(record) {
+        const key = resultKey(record.roundId, record.accountId);
+        if (results.has(key)) return false;
+        results.set(key, { ...record });
+        return true;
+      },
+      async get(roundId, accountId) {
+        return copy(results.get(resultKey(roundId, accountId)));
+      },
+      async listByRound(roundId) {
+        return [...results.values()]
+          .filter((r) => r.roundId === roundId)
+          .sort((a, b) => a.recordedAt - b.recordedAt || a.accountId.localeCompare(b.accountId))
+          .map((r) => ({ ...r }));
+      },
+      async listByAccount(accountId) {
+        return [...results.values()]
+          .filter((r) => r.accountId === accountId)
+          .sort((a, b) => b.recordedAt - a.recordedAt || a.roundId.localeCompare(b.roundId))
+          .map((r) => ({ ...r }));
       },
     },
     async close() {

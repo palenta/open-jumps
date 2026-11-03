@@ -7,10 +7,11 @@ import type {
   MembershipStatus,
   PonyGender,
   Repositories,
+  ResultRecord,
   RiderGender,
   SessionRecord,
 } from './repositories.js';
-import type { PonyCategory } from '@open-jumps/shared';
+import type { EliminationReason, HeightClass, PonyCategory, RiderStatus } from '@open-jumps/shared';
 
 // The only PIN-related column is pin_hash: the PIN itself is never written anywhere (plan 2.3).
 const SCHEMA = `
@@ -53,6 +54,26 @@ const SCHEMA = `
     confirmed_at INTEGER,
     PRIMARY KEY (club_id, account_id)
   );
+  -- One row per (round, rider), plan 2.5; the seed keeps the round's chance outcomes reproducible (plan 2.3).
+  CREATE TABLE IF NOT EXISTS results (
+    round_id TEXT NOT NULL,
+    account_id TEXT NOT NULL,
+    course_id TEXT NOT NULL,
+    course_version INTEGER NOT NULL,
+    rules_version INTEGER NOT NULL,
+    height_class INTEGER NOT NULL,
+    faults INTEGER NOT NULL,
+    time_ms INTEGER,
+    status TEXT NOT NULL,
+    elimination_reason TEXT,
+    autopilot INTEGER NOT NULL,
+    schoolmaster INTEGER NOT NULL,
+    mode TEXT NOT NULL,
+    seed TEXT NOT NULL,
+    recorded_at INTEGER NOT NULL,
+    PRIMARY KEY (round_id, account_id)
+  );
+  CREATE INDEX IF NOT EXISTS results_account_recorded_at ON results (account_id, recorded_at DESC);
 `;
 
 type Row = Record<string, SQLOutputValue>;
@@ -61,6 +82,9 @@ const str = (row: Row, column: string): string => String(row[column]);
 const num = (row: Row, column: string): number => Number(row[column]);
 const numOrNull = (row: Row, column: string): number | null => (row[column] === null ? null : Number(row[column]));
 const strOrNull = (row: Row, column: string): string | null => (row[column] === null ? null : String(row[column]));
+const bool = (row: Row, column: string): boolean => Number(row[column]) === 1;
+/** SQLite has no boolean type; node:sqlite binds no booleans either, so they travel as 0 / 1. */
+const flag = (value: boolean): number => (value ? 1 : 0);
 
 const toAccount = (row: Row): AccountRecord => ({
   id: str(row, 'id'),
@@ -119,6 +143,24 @@ const toMembership = (row: Row): MembershipRecord => ({
   confirmedAt: numOrNull(row, 'confirmed_at'),
 });
 
+const toResult = (row: Row): ResultRecord => ({
+  roundId: str(row, 'round_id'),
+  accountId: str(row, 'account_id'),
+  courseId: str(row, 'course_id'),
+  courseVersion: num(row, 'course_version'),
+  rulesVersion: num(row, 'rules_version'),
+  heightClass: num(row, 'height_class') as HeightClass,
+  faults: num(row, 'faults'),
+  timeMs: numOrNull(row, 'time_ms'),
+  status: str(row, 'status') as RiderStatus,
+  eliminationReason: strOrNull(row, 'elimination_reason') as EliminationReason | null,
+  autopilot: bool(row, 'autopilot'),
+  schoolmaster: bool(row, 'schoolmaster'),
+  mode: str(row, 'mode') as ResultRecord['mode'],
+  seed: str(row, 'seed'),
+  recordedAt: num(row, 'recorded_at'),
+});
+
 /** Open (and migrate) the database at `path`; ':memory:' gives a private in-memory database. */
 export function createSqliteRepositories(path: string): Repositories {
   const db = new DatabaseSync(path);
@@ -128,6 +170,8 @@ export function createSqliteRepositories(path: string): Repositories {
     const row = db.prepare(sql).get(...params);
     return row === undefined ? null : map(row as Row);
   };
+  const all = <T>(sql: string, params: SQLOutputValue[], map: (row: Row) => T): T[] =>
+    db.prepare(sql).all(...params).map((row) => map(row as Row));
   const run = (sql: string, params: SQLOutputValue[]): number => Number(db.prepare(sql).run(...params).changes);
 
   return {
@@ -239,10 +283,32 @@ export function createSqliteRepositories(path: string): Repositories {
         run('DELETE FROM memberships WHERE club_id = ? AND account_id = ?', [clubId, accountId]);
       },
       async listMemberships(clubId, status?: MembershipStatus) {
-        const rows = status === undefined
-          ? db.prepare('SELECT * FROM memberships WHERE club_id = ? ORDER BY requested_at, account_id').all(clubId)
-          : db.prepare('SELECT * FROM memberships WHERE club_id = ? AND status = ? ORDER BY requested_at, account_id').all(clubId, status);
-        return rows.map((row) => toMembership(row as Row));
+        return status === undefined
+          ? all('SELECT * FROM memberships WHERE club_id = ? ORDER BY requested_at, account_id', [clubId], toMembership)
+          : all('SELECT * FROM memberships WHERE club_id = ? AND status = ? ORDER BY requested_at, account_id', [clubId, status], toMembership);
+      },
+    },
+    // Results (plan 2.5): the primary key (round_id, account_id) makes "first row wins" a property of the file.
+    results: {
+      async insertOnce(r) {
+        const inserted = run(
+          `INSERT INTO results (round_id, account_id, course_id, course_version, rules_version, height_class, faults,
+             time_ms, status, elimination_reason, autopilot, schoolmaster, mode, seed, recorded_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT (round_id, account_id) DO NOTHING`,
+          [r.roundId, r.accountId, r.courseId, r.courseVersion, r.rulesVersion, r.heightClass, r.faults,
+            r.timeMs, r.status, r.eliminationReason, flag(r.autopilot), flag(r.schoolmaster), r.mode, r.seed, r.recordedAt],
+        );
+        return inserted === 1;
+      },
+      async get(roundId, accountId) {
+        return one('SELECT * FROM results WHERE round_id = ? AND account_id = ?', [roundId, accountId], toResult);
+      },
+      async listByRound(roundId) {
+        return all('SELECT * FROM results WHERE round_id = ? ORDER BY recorded_at, account_id', [roundId], toResult);
+      },
+      async listByAccount(accountId) {
+        return all('SELECT * FROM results WHERE account_id = ? ORDER BY recorded_at DESC, round_id', [accountId], toResult);
       },
     },
     async close() {

@@ -48,8 +48,11 @@ export type AttemptDecision =
  * the first accepted packet decides immediately; without one, "no tap" is fixed at the deadline.
  *
  * Ordering contract (plan 2.3: a packet received exactly at the deadline is accepted): for a server time T,
- * every packet with receiveTime ≤ T is submitted BEFORE tick(T). The judge enforces it: submitting a packet
- * whose receiveTime is not later than the last tick throws an Error (a programming error, never a lost tap).
+ * the engine submits every packet with receiveTime ≤ T BEFORE tick(T). A packet stamped T that arrives after
+ * tick(T) — the same millisecond, later in the event loop — is still accepted with its true times: the age,
+ * future and deadline rules see the receive time as stamped, never a shifted one (if the attempt is already
+ * decided it is a 'duplicate' / 'after-deadline' like any later packet). Only a stamp OLDER than the last
+ * tick is a programming error: submitting it throws an Error (never a silently lost tap).
  */
 export class AttemptJudge {
   private readonly t0: number;
@@ -71,9 +74,9 @@ export class AttemptJudge {
     if (packet.fence !== this.fence || packet.attempt !== this.attempt) {
       return { verdict: { accepted: false, reason: 'wrong-attempt' }, decision: this.decision };
     }
-    if (packet.receiveTime <= this.lastTick) {
+    if (packet.receiveTime < this.lastTick) {
       throw new Error(
-        `packet out of order: receiveTime ${packet.receiveTime} is not later than the last tick ${this.lastTick}`,
+        `packet out of order: receiveTime ${packet.receiveTime} is earlier than the last tick ${this.lastTick}`,
       );
     }
     if (this.state.decided) {
