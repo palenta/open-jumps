@@ -1690,16 +1690,47 @@ describe('the moment of a press is the moment of the touch, not of its handling 
   });
 
   it('pressTime: the event time when it is a moment of the clock (finite, after its origin, not later than now), however old; otherwise now', () => {
-    expect(pressTime(9_880, 10_000)).toBe(9_880);
-    expect(pressTime(10_000, 10_000)).toBe(10_000);
-    expect(pressTime(9_000, 10_000)).toBe(9_000);
-    expect(pressTime(8_500, 10_000)).toBe(8_500); // old, but the touch: never replaced by the handling (audit K1 r4 #1)
-    expect(pressTime(1, 10_000)).toBe(1);
-    expect(pressTime(10_001, 10_000)).toBe(10_000);
-    expect(pressTime(0, 10_000)).toBe(10_000);
-    expect(pressTime(-5, 10_000)).toBe(10_000);
-    expect(pressTime(Number.NaN, 10_000)).toBe(10_000);
-    expect(pressTime(Number.NEGATIVE_INFINITY, 10_000)).toBe(10_000);
+    expect(pressTime(9_880, 10_000).time).toBe(9_880);
+    expect(pressTime(10_000, 10_000).time).toBe(10_000);
+    expect(pressTime(9_000, 10_000).time).toBe(9_000);
+    expect(pressTime(8_500, 10_000).time).toBe(8_500); // old, but the touch: never replaced by the handling (audit K1 r4 #1)
+    expect(pressTime(1, 10_000).time).toBe(1);
+    expect(pressTime(10_001, 10_000).time).toBe(10_000);
+    expect(pressTime(0, 10_000).time).toBe(10_000);
+    expect(pressTime(-5, 10_000).time).toBe(10_000);
+    expect(pressTime(Number.NaN, 10_000).time).toBe(10_000);
+    expect(pressTime(Number.NEGATIVE_INFINITY, 10_000).time).toBe(10_000);
+  });
+});
+
+describe('pressTime says where the moment came from (K1.1 step 2)', () => {
+  it("source 'event' with no reason for a correct stamp of any age: just now, 120 ms, 1.5 s old, the first millisecond of the clock", () => {
+    for (const stamp of [10_000, 9_880, 8_500, 1]) {
+      expect(pressTime(stamp, 10_000), String(stamp)).toEqual({ time: stamp, source: 'event', reason: null });
+    }
+  });
+
+  it("source 'fallback' with 'not-finite' for NaN and both infinities: the moment is now", () => {
+    for (const stamp of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) {
+      expect(pressTime(stamp, 10_000), String(stamp)).toEqual({ time: 10_000, source: 'fallback', reason: 'not-finite' });
+    }
+  });
+
+  it("source 'fallback' with 'non-positive' for 0 and a negative stamp", () => {
+    expect(pressTime(0, 10_000)).toEqual({ time: 10_000, source: 'fallback', reason: 'non-positive' });
+    expect(pressTime(-5, 10_000)).toEqual({ time: 10_000, source: 'fallback', reason: 'non-positive' });
+  });
+
+  it("source 'fallback' with 'later-than-now' for a stamp 1 ms after now and for an epoch stamp of another base", () => {
+    expect(pressTime(10_001, 10_000)).toEqual({ time: 10_000, source: 'fallback', reason: 'later-than-now' });
+    expect(pressTime(1_700_000_000_000, 10_000)).toEqual({ time: 10_000, source: 'fallback', reason: 'later-than-now' });
+  });
+
+  it('negative: an old stamp is never a fallback, and the rule that picks the moment is the K1 one', () => {
+    const old = pressTime(2_000, 10_000);
+    expect(old.source).toBe('event');
+    expect(old.reason).toBeNull();
+    expect(old.time).toBe(2_000);
   });
 });
 

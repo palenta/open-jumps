@@ -24,6 +24,7 @@ import type { GameApi } from '../net/api.js';
 import type { ClientClock } from '../net/clientClock.js';
 import type { RoomSession, SessionEnd } from '../net/roomSession.js';
 import type { ClassTableWire, ClientRoomMessage, LobbyStateSnapshot, LobbyView, PublicProfile, RoundEventWire, ServerMessage } from '../net/types.js';
+import { NotImplementedError } from '../errors.js';
 import { InstantHint } from '../round/hint.js';
 import { chaseCamera, type CameraPose } from '../scene/camera.js';
 import { RemoteInterpolator, RoundClockEstimate } from '../scene/interpolation.js';
@@ -106,6 +107,23 @@ export interface Game {
 
 const CONTROLS: Control[] = ['turn-left', 'turn-right', 'gear', 'tap'];
 
+/** Where the moment of a press came from: the event's own timeStamp, or the clock at handling instead of it. */
+export type PressTimeSource = 'event' | 'fallback';
+
+/** Why the event's timeStamp was not the moment: null when it was ('event'); otherwise the first rule it broke. */
+export type PressTimeReason = null | 'not-finite' | 'non-positive' | 'later-than-now';
+
+/**
+ * The moment of a press (K1.1 step 2): `time` as before, and where it came from — source 'event' with reason null
+ * when the timeStamp is the moment (however old), else source 'fallback' with the reason, checked in this order:
+ * 'not-finite' (NaN, ±Infinity), 'non-positive' (0 or below), 'later-than-now' (after the clock read while handling).
+ */
+export interface PressTime {
+  readonly time: number;
+  readonly source: PressTimeSource;
+  readonly reason: PressTimeReason;
+}
+
 /**
  * The moment of a press in the clock's units (audit K1 r3 #4, r4 #1): the event's own timeStamp — a
  * DOMHighResTimeStamp in the base of performance.now(), the clock main.ts gives ClientClock — whenever it can be a
@@ -117,11 +135,21 @@ const CONTROLS: Control[] = ['turn-left', 'turn-right', 'gear', 'tap'];
  * a fresh tap inside it. What an old press means is then the controller's business: a tap or a turn already older
  * than the judge accepts (INPUT.maxPressAgeMs = PACKET.maxAgeMs) is not sent at all (see InputController.press). The
  * handler runs whenever the main thread is free — 58–122 ms after the touch was measured while frames took 33–77 ms
- * — and the judge must see when the finger landed, not when the page got round to it.
+ * — and the judge must see when the finger landed, not when the page got round to it. The result names the source
+ * of the moment and, for a fallback, the reason (PressTime); the rule that chooses the moment is unchanged by K1.1.
  */
-export function pressTime(timeStamp: number, now: number): number {
-  if (!Number.isFinite(timeStamp) || timeStamp <= 0 || timeStamp > now) return now;
-  return timeStamp;
+export function pressTime(timeStamp: number, now: number): PressTime {
+  const time = !Number.isFinite(timeStamp) || timeStamp <= 0 || timeStamp > now ? now : timeStamp;
+  // K1.1 contract stage: the moment is chosen by the K1 rule above; source and reason are not built yet.
+  return {
+    time,
+    get source(): never {
+      throw new NotImplementedError('pressTime().source (K1.1 step 2)');
+    },
+    get reason(): never {
+      throw new NotImplementedError('pressTime().reason (K1.1 step 2)');
+    },
+  };
 }
 
 /** Everything the client keeps for one class: re-created at every class-course, so a new class starts clean. */
@@ -698,8 +726,8 @@ export function createGame(deps: GameDeps): Game {
     // and the instant hint all read the event's own time; a tap or a turn already too old for the judge when it is
     // handled is not sent, spends nothing and shows no hint (audit K1 r4 #1).
     const handledAt = deps.clock.now();
-    const at = pressTime(event.timeStamp, handledAt);
-    const sent = round.controller.press(control, at, handledAt);
+    const at = pressTime(event.timeStamp, handledAt).time;
+    const sent = round.controller.press(control, at, handledAt).message;
     if (sent?.type === 'tap') {
       const hint = round.hint.tap(at);
       if (hint) round.caption = { event: { type: 'takeoff', label: hint.outcome.label, fence: hint.fence }, riderId: me?.id ?? '' };
