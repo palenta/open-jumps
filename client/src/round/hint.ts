@@ -85,7 +85,7 @@ export class InstantHint {
     this.line = line;
   }
 
-  /** The last turn's outcome said hardTurn (narrower window at the next fence); cleared by the next approach's take-off. */
+  /** The last turn's outcome said hardTurn (narrower window at the next fence); spent by the take-off that clears that fence. */
   setHardTurn(on: boolean): void {
     this.hardTurn = on;
   }
@@ -117,8 +117,9 @@ export class InstantHint {
     const shown = this.shown;
     this.open = null;
     this.shown = null;
-    // The take-off (whatever it was) consumes the hard turn that narrowed it.
-    this.hardTurn = false;
+    // The hard turn lasts until the fence it applies to is cleared, exactly as the server keeps recentHardTurn: a
+    // refusal, run-out or fall leaves it in force for the next attempt of the same fence (audit K1 r1 #8).
+    if (event.outcome.cleared) this.hardTurn = false;
     if (shown === null || shown.fence !== event.fence || shown.attempt !== event.attempt) {
       return { hint: null, verdict: event.outcome, agreed: null };
     }
