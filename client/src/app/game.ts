@@ -27,10 +27,26 @@ import type { ClassTableWire, ClientRoomMessage, LobbyStateSnapshot, LobbyView, 
 import { NotImplementedError } from '../errors.js';
 import { InstantHint } from '../round/hint.js';
 import { chaseCamera, type CameraPose } from '../scene/camera.js';
+import type { TakeoffMarker } from '../scene/takeoffMarker.js';
 import { RemoteInterpolator, RoundClockEstimate } from '../scene/interpolation.js';
 import { buildTrack, pointAt, type Track, type TrackPoint } from '../scene/track.js';
 import { walkFocus, walkModel } from '../walk/walkModel.js';
 import { screenFor, type Screen } from './screens.js';
+
+/**
+ * How the own horse's visible position was chosen in a frame (K1.1 step 7) — one value, which the camera follows too:
+ * - 'patch': the position of the latest state patch (as in K1);
+ * - 'forecast': the own approach is open, the clock is measured and the approach has a speed: the position the
+ *   server's own run gives at toServer(now) — fence.distanceM − speedMps × (t0 − toServer(now)) / 1000, never past
+ *   the take-off point and never behind the latest server position; from t0 on, the take-off point itself;
+ * - 'hold': after the own 'takeoff' verdict, the last visible position is held until the first patch that arrives
+ *   AFTER that event (the server sends a tick's events before the state of the same tick: a patch from before the
+ *   event is stale); then 'patch'. For a fence cleared (perfecta, cero_faltas, batida_corta, batida_larga) the
+ *   position never goes back: a fresh patch behind the held position (the horse not there yet) keeps holding until a
+ *   patch ahead of it; for rehuse, desvio and caida the fresh patch puts the horse at fence − 2 m as the server
+ *   decided — that step back is allowed.
+ */
+export type OwnHorseMode = 'patch' | 'forecast' | 'hold';
 
 /** What the scene draws in one frame: every horse of the running heat at its point, the camera, the walk focus. */
 export interface SceneFrame {
@@ -39,6 +55,15 @@ export interface SceneFrame {
   camera: CameraPose | null;
   /** The fence the course walk focuses on (1-based), null outside the walk. */
   focusFence: number | null;
+  /**
+   * The own horse's take-off marker (K1.1 step 7, takeoffMarker.ts): from the own 'approach' (or an 'approach-sync'
+   * with an approach) until the own 'takeoff' verdict, null otherwise — before the first approach, after the verdict,
+   * on every screen but the round, for a new class, heat or session. The weak marks at the other fences are the
+   * arena's own and need nothing here.
+   */
+  takeoff: TakeoffMarker | null;
+  /** How the own horse's position in `riders` (and the camera) was chosen this frame; null when the own horse is not drawn. */
+  ownMode: OwnHorseMode | null;
 }
 
 /** The 3D arena. Mounted into the arena element; told the course; drawn once per frame; disposed on destroy. */
@@ -285,6 +310,20 @@ interface RoundModules {
  *     not go out shows none. While nothing is to be said the element is empty or hidden.
  *   · The controls exist on the round screen only: on the walk (and every other screen) none of the four is shown and
  *     a finger is not handled at all — no message, no data-pressed, no note.
+ * - round, K1.1 step 7 — the take-off marker and the own horse on the approach (SceneFrame.takeoff / ownMode):
+ *   · The marker of the own open approach is computed at every frame: at the take-off point (pointAt(track,
+ *     fence.distanceM)); its half-lengths markerHalfLengths(window, speedMps) with window =
+ *     round.hint.approachWindow.windowAt(now) — the very window the instant hint judges with (step 6) — and the
+ *     speedMps of the 'approach' / 'approach-sync' (frozen: a later gear change changes cleanMs, never the speed);
+ *     its state markerState(clock.toServer(now), t0, window, speedMps). It goes at the own 'takeoff' verdict (no
+ *     bright marker after it), with an 'approach-sync' without an approach, at a new class, heat or session; another
+ *     rider's approach changes nothing. The arena frees the marker's resources with the course.
+ *   · The own horse's visible position — one value, the camera follows it — is chosen by OwnHorseMode: 'forecast'
+ *     while the own approach is open with a speed and a measured clock; 'hold' from the own 'takeoff' verdict until
+ *     the first patch after it (with the cleared / not-cleared rules of OwnHorseMode); 'patch' otherwise. A new
+ *     approach (the next attempt, the next fence) or an 'approach-sync' with one → 'forecast' with its t0 and speed;
+ *     an 'approach-sync' without one → 'patch' (any hold is dropped); a new heat or class, the end of the ride, the
+ *     clock lost or re-measured without a t0 → 'patch'. The other horses are drawn as in K1.
  * - results: once the class table arrived, [data-list="results"] > [data-class] tables with tr[data-id] rows
  *   (resultsModel), [data-action="again"] (host only; sends start-class) and [data-action="leave"]. Before it —
  *   between the heats ('results') and in the moment before the table lands ('done', also for a late joiner who gets
@@ -1189,7 +1228,7 @@ export function createGame(deps: GameDeps): Game {
     const currentScreen = screen();
     if (currentScreen === 'walk' && round) {
       updateHud();
-      deps.scene.render({ phase: 'walk', riders: [], camera: null, focusFence: focusAt(now) });
+      deps.scene.render({ phase: 'walk', riders: [], camera: null, focusFence: focusAt(now), takeoff: null, ownMode: null });
       return;
     }
     if (currentScreen === 'round' && round && current && me) {
@@ -1205,10 +1244,19 @@ export function createGame(deps: GameDeps): Game {
         riders.push({ id, point, isOwn, label: riderOnPony(locale, names(), id) });
       }
       const camera = ownPoint ?? riders[0]?.point ?? null;
-      deps.scene.render({ phase: 'riding', riders, camera: camera ? chaseCamera(camera) : null, focusFence: null });
+      // K1.1 contract stage: the own horse is drawn from the patch as in K1 and no take-off marker is drawn yet; the
+      // code stage adds the marker and the forecast / hold modes of step 7.
+      deps.scene.render({
+        phase: 'riding',
+        riders,
+        camera: camera ? chaseCamera(camera) : null,
+        focusFence: null,
+        takeoff: null,
+        ownMode: ownPoint !== null ? 'patch' : null,
+      });
       return;
     }
-    deps.scene.render({ phase: currentScreen === 'results' ? 'results' : 'idle', riders: [], camera: null, focusFence: null });
+    deps.scene.render({ phase: currentScreen === 'results' ? 'results' : 'idle', riders: [], camera: null, focusFence: null, takeoff: null, ownMode: null });
   }
 
   function resize(): void {

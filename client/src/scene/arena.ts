@@ -4,11 +4,37 @@
 // the horses moving along the track from the server's positions, the chase camera and the course-walk fly-over —
 // and the housekeeping: every object this file builds is freed (geometry, materials, textures) when a new course
 // replaces it, when the room is left and when the scene is disposed (audit K1 r1 #9), so "again" after "again"
-// on a phone does not pile up GPU buffers.
+// on a phone does not pile up GPU buffers. K1.1 step 7 adds the take-off markers: a weak mark at the take-off point
+// of every fence of the course, always, and the bright band of the own open approach (SceneFrame.takeoff) drawn in
+// its state; both are part of the course and are freed with it.
 import * as THREE from 'three';
 import type { CourseSpec } from '@open-jumps/shared';
 import type { SceneFrame, SceneLike } from '../app/game.js';
+import { NotImplementedError } from '../errors.js';
+import type { MarkerState } from './takeoffMarker.js';
 import { buildTrack, fencePose, pointAt, type Track } from './track.js';
+
+/** One take-off marker as the arena shows it (for the tests: no WebGL is needed to read it). */
+export interface MarkerView {
+  fence: number;
+  /** 'weak': the mark every fence of the course carries; 'bright': the band of the own open approach. */
+  kind: 'weak' | 'bright';
+  /** The band's state (SceneFrame.takeoff.state); null for a weak mark. */
+  state: MarkerState | null;
+  /** The band's full length along the track, metres (twice cleanHalfM); null for a weak mark or a band without speed (an outline). */
+  lengthM: number | null;
+}
+
+/**
+ * The arena scene (SceneLike) with a read-out of its take-off markers:
+ * - markers(): what the arena shows right now — one weak mark per fence of the current course, in course order, and,
+ *   when the last rendered frame carried a takeoff marker, the bright band at that fence in its state with its length
+ *   (2 × cleanHalfM). No course: []. A frame without a takeoff marker leaves the weak marks only. Rendering the same
+ *   marker again builds nothing new; setCourse() and dispose() free every marker resource with the course.
+ */
+export interface ArenaScene extends SceneLike {
+  markers(): MarkerView[];
+}
 
 const COLOURS = {
   sky: 0x9fc5e8,
@@ -140,7 +166,7 @@ function makeTrackRibbon(track: Track): THREE.Group {
   return group;
 }
 
-export function createArenaScene(): SceneLike {
+export function createArenaScene(): ArenaScene {
   const scene = new THREE.Scene();
   scene.background = new THREE.Color(COLOURS.sky);
   const camera = new THREE.PerspectiveCamera(55, 1, 0.1, 500);
@@ -289,6 +315,10 @@ export function createArenaScene(): SceneLike {
       if (!renderer) return;
       renderer.render(scene, camera);
       for (const [id, horse] of horses) if (seen.has(id)) placeLabel(horse.label, horse.group);
+    },
+
+    markers(): MarkerView[] {
+      throw new NotImplementedError('the arena take-off markers (K1.1 step 7)');
     },
 
     dispose(): void {

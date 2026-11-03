@@ -19,6 +19,8 @@ import {
   type WindowLike,
 } from '../src/app/game.js';
 import { hitTest, layoutFor, type Control, type Layout } from '../src/input/layout.js';
+import { chaseCamera } from '../src/scene/camera.js';
+import { buildTrack, pointAt } from '../src/scene/track.js';
 import type { ApiResult, CreateRoomReply } from '../src/net/api.js';
 import { ClientClock } from '../src/net/clientClock.js';
 import type { SessionEnd, SessionStatus } from '../src/net/roomSession.js';
@@ -2699,5 +2701,247 @@ describe('the course map on the walk screen (K1.1 step 4)', () => {
   it('negative: the round screen has no map', async () => {
     const h = await inRound();
     expect(h.root.querySelector('[data-walk-map]')).toBeNull();
+  });
+});
+
+describe('the take-off marker in the frames of the round (K1.1 step 7)', () => {
+  /** 70 cm (the default class of a C pony) in collected canter: 157.5 ms clean, 58.5 ms perfect; at 5 m/s 0.7875 m and 0.2925 m. */
+  const CLEAN = 157.5;
+  const marker = (h: Harness, now = h.clock.now()) => {
+    h.game.frame(now);
+    return h.scene.frames.at(-1)?.takeoff ?? null;
+  };
+
+  it('the own approach with a speed: fence, take-off point and band from the shared window, the state by the clock against t0', async () => {
+    const h = await inRound();
+    const t0 = h.clock.now() + 1_000;
+    approachOwn(h, 1, 1, t0, 5);
+    const first = marker(h);
+    expect(first).toMatchObject({ fence: 1, distanceM: 30, state: 'approach' });
+    expect(first?.cleanHalfM).toBeCloseTo((CLEAN / 1000) * 5, 9);
+    expect(first?.perfectHalfM).toBeCloseTo((58.5 / 1000) * 5, 9);
+    expect(marker(h, t0 - CLEAN - 1)?.state).toBe('approach');
+    expect(marker(h, t0 - CLEAN)?.state).toBe('clean');
+    expect(marker(h, t0)?.state).toBe('perfect');
+    expect(marker(h, t0 + CLEAN)?.state).toBe('clean');
+    expect(marker(h, t0 + CLEAN + 1)?.state).toBe('late');
+  });
+
+  it('the own take-off verdict puts the bright band out: no marker in the frames after it', async () => {
+    const h = await inRound();
+    approachOwn(h, 1, 1, h.clock.now() + 1_000, 5);
+    expect(marker(h)).not.toBeNull();
+    h.clock.t += 1_000;
+    h.session().emitMessage(roundEvent({ type: 'takeoff', riderId: 'host', fence: 1, attempt: 1, decidedAt: h.clock.now(), offsetMs: 0, outcome: clean, approach: approach70 }));
+    expect(marker(h)).toBeNull();
+  });
+
+  it('an approach without speed: only the outline — state approach, no band length', async () => {
+    const h = await inRound();
+    const t0 = h.clock.now() + 1_000;
+    approachOwn(h, 1, 1, t0, null);
+    expect(marker(h, t0)).toEqual({ fence: 1, distanceM: 30, state: 'approach', cleanHalfM: null, perfectHalfM: null });
+  });
+
+  it('a clock not measured yet: only the outline, whatever the moment', async () => {
+    const h = await inRound();
+    const t0 = h.clock.now() + 1_000;
+    approachOwn(h, 1, 1, t0, 5);
+    h.clock.ready = () => false;
+    h.clock.toServer = () => null;
+    expect(marker(h, t0)?.state).toBe('approach');
+  });
+
+  it('negative: another rider\'s approach draws no marker for the own horse', async () => {
+    const h = await inRound();
+    h.session().emitMessage(roundEvent({ type: 'approach', riderId: 'ana', fence: 1, attempt: 1, t0: h.clock.now() + 900, speedMps: 5 }));
+    expect(marker(h)).toBeNull();
+  });
+
+  it('approach-sync with an approach and a speed lights the marker; one without an approach puts it out', async () => {
+    const h = await inRound();
+    const t0 = h.clock.now() + 1_000;
+    h.session().emitMessage({ type: 'approach-sync', classNumber: 1, heatIndex: 0, hardTurn: false, approach: { fence: 1, attempt: 1, t0, speedMps: 5 } });
+    expect(marker(h, t0)).toMatchObject({ fence: 1, state: 'perfect' });
+    h.session().emitMessage({ type: 'approach-sync', classNumber: 1, heatIndex: 0, hardTurn: false, approach: null });
+    expect(marker(h, t0)).toBeNull();
+  });
+
+  it('a gear change after the approach opened changes the band (gallop halves it), never the speed', async () => {
+    const h = await inRound();
+    const t0 = h.clock.now() + 1_000;
+    approachOwn(h, 1, 1, t0, 5);
+    h.session().emitState(ridingState({ riders: { host: rider('host', { gear: 'gallop', positionM: 20 }), ana: rider('ana') } }));
+    h.clock.t += 100;
+    expect(marker(h)?.cleanHalfM).toBeCloseTo((CLEAN * 0.5 / 1000) * 5, 9);
+  });
+
+  it('a new class starts without a marker', async () => {
+    const h = await inApproach();
+    approachOwn(h, 1, 1, h.clock.now() + 1_000, 5);
+    await inResults(h);
+    startClass(h, 2);
+    await settle();
+    expect(marker(h)).toBeNull();
+  });
+});
+
+describe('the own horse on the approach: one visible position, the camera with it (K1.1 step 7)', () => {
+  const track = buildTrack(course);
+  /** The own horse in the latest frame at `now`, its mode, and whether the camera follows that very point. */
+  function own(h: Harness, now = h.clock.now()): { positionM: number | null; mode: string | null; cameraFollows: boolean } {
+    h.game.frame(now);
+    const frame = h.scene.frames.at(-1);
+    const entry = frame?.riders.find((r) => r.isOwn);
+    if (!frame || !entry) return { positionM: null, mode: frame?.ownMode ?? null, cameraFollows: false };
+    // The position along the track whose point is drawn (the one-fence course is a straight line along +x).
+    const positionM = entry.point.x;
+    const expected = chaseCamera(entry.point);
+    const cameraFollows = JSON.stringify(frame.camera) === JSON.stringify(expected);
+    return { positionM, mode: frame.ownMode, cameraFollows };
+  }
+  const expectOwn = (h: Harness, positionM: number, mode: string, now = h.clock.now()): void => {
+    const seen = own(h, now);
+    expect(seen.mode, `mode at ${String(now)}`).toBe(mode);
+    expect(seen.positionM ?? Number.NaN, `position at ${String(now)}`).toBeCloseTo(positionM, 6);
+    expect(seen.cameraFollows, 'the camera follows the drawn position').toBe(true);
+    expect(pointAt(track, positionM).x).toBeCloseTo(positionM, 9); // the straight course: position = x
+  };
+  /** A state patch with the own horse at `positionM` (Ana stays at 0 m). */
+  const patch = (h: Harness, positionM: number, over: Partial<RiderView> = {}): void =>
+    h.session().emitState(ridingState({ riders: { host: rider('host', { positionM, ...over }), ana: rider('ana') } }));
+  const takeoffOwn = (h: Harness, outcome: TakeoffOutcome, attempt = 1): void =>
+    h.session().emitMessage(roundEvent({ type: 'takeoff', riderId: 'host', fence: 1, attempt, decidedAt: h.clock.now(), offsetMs: 0, outcome, approach: approach70 }));
+  const refusal: TakeoffOutcome = { kind: 'refusal', faults: 0, cleared: false, label: 'rehuse', horseJumped: false };
+
+  it("forecast: fence − speedMps × (t0 − server now) / 1000 at t0 − 1000, t0 − cleanMs and t0 — the server's own run, ahead of the patch", async () => {
+    const h = await inRound();
+    const t0 = h.clock.now() + 1_000;
+    patch(h, 24);
+    approachOwn(h, 1, 1, t0, 5);
+    expectOwn(h, 25, 'forecast', t0 - 1_000);
+    expectOwn(h, 30 - 5 * 0.1575, 'forecast', t0 - 157.5);
+    expectOwn(h, 30, 'forecast', t0);
+  });
+
+  it('forecast: never past the take-off point — after t0 the horse waits at it for the verdict', async () => {
+    const h = await inRound();
+    const t0 = h.clock.now() + 1_000;
+    approachOwn(h, 1, 1, t0, 5);
+    expectOwn(h, 30, 'forecast', t0 + 300);
+  });
+
+  it('forecast: a delayed patch (300 ms older) does not move the horse back; a patch ahead of the forecast is not overtaken', async () => {
+    const h = await inRound();
+    const t0 = h.clock.now() + 1_000;
+    approachOwn(h, 1, 1, t0, 5);
+    patch(h, 23.5); // 300 ms behind the server's 25 m
+    expectOwn(h, 25, 'forecast', t0 - 1_000);
+    patch(h, 26); // the server says further on than the forecast: never behind the latest server position
+    expectOwn(h, 26, 'forecast', t0 - 1_000);
+  });
+
+  it('negative: without a speed, or without a measured clock, the own horse is drawn from the patch', async () => {
+    const noSpeed = await inRound();
+    approachOwn(noSpeed, 1, 1, noSpeed.clock.now() + 1_000, null);
+    patch(noSpeed, 24);
+    expectOwn(noSpeed, 24, 'patch');
+    const noClock = await inRound();
+    approachOwn(noClock, 1, 1, noClock.clock.now() + 1_000, 5);
+    noClock.clock.ready = () => false;
+    noClock.clock.toServer = () => null;
+    patch(noClock, 24);
+    expectOwn(noClock, 24, 'patch');
+  });
+
+  it('a cleared fence: forecast → take-off → a stale patch keeps the position (hold, never back) → the fresh patch after the event leads on', async () => {
+    const h = await inRound();
+    const t0 = h.clock.now() + 1_000;
+    approachOwn(h, 1, 1, t0, 5);
+    h.clock.t = t0 + 20;
+    expectOwn(h, 30, 'forecast');
+    takeoffOwn(h, clean); // the server's events of a tick come before its state: the patch that follows is the fresh one
+    expectOwn(h, 30, 'hold');
+    patch(h, 30.4, { nextFence: 2 });
+    expectOwn(h, 30.4, 'patch');
+    patch(h, 33, { nextFence: 2 });
+    expectOwn(h, 33, 'patch');
+  });
+
+  it('a cleared fence whose first fresh patch is still behind the held position: no step back until a patch ahead of it', async () => {
+    const h = await inRound();
+    const t0 = h.clock.now() + 1_000;
+    approachOwn(h, 1, 1, t0, 5);
+    h.clock.t = t0;
+    expectOwn(h, 30, 'forecast');
+    takeoffOwn(h, chip);
+    patch(h, 29.8, { nextFence: 2 }); // fresh, but behind 30 m: the horse is held, never drawn back
+    expectOwn(h, 30, 'hold');
+    patch(h, 30.25, { nextFence: 2 });
+    expectOwn(h, 30.25, 'patch');
+  });
+
+  it('a stale patch between the verdict and the fresh one is no fresh patch: the hold stays through it', async () => {
+    const h = await inRound();
+    const t0 = h.clock.now() + 1_000;
+    patch(h, 29.5);
+    approachOwn(h, 1, 1, t0, 5);
+    h.clock.t = t0;
+    expectOwn(h, 30, 'forecast');
+    takeoffOwn(h, clean);
+    expectOwn(h, 30, 'hold'); // a frame before any patch after the event: the last visible position
+    h.clock.t += 50;
+    expectOwn(h, 30, 'hold');
+  });
+
+  it('a refusal: forecast → rehúse → hold → the fresh patch at fence − 2 m is taken (that step back is the server\'s) → the next attempt\'s approach forecasts again', async () => {
+    const h = await inRound();
+    const t0 = h.clock.now() + 1_000;
+    approachOwn(h, 1, 1, t0, 5);
+    h.clock.t = t0 + 700;
+    expectOwn(h, 30, 'forecast');
+    takeoffOwn(h, refusal);
+    expectOwn(h, 30, 'hold');
+    patch(h, 28, { attempt: 2 });
+    expectOwn(h, 28, 'patch');
+    h.clock.t += 3_000;
+    const retry = h.clock.now() + 400; // 2 m at 5 m/s
+    approachOwn(h, 1, 2, retry, 5);
+    expectOwn(h, 28, 'forecast');
+    expectOwn(h, 29, 'forecast', retry - 200);
+  });
+
+  it('taking control back: approach-sync with an approach forecasts it; one without an approach drops a hold and draws the patch', async () => {
+    const h = await inRound();
+    const t0 = h.clock.now() + 1_000;
+    h.session().emitMessage({ type: 'approach-sync', classNumber: 1, heatIndex: 0, hardTurn: false, approach: { fence: 1, attempt: 1, t0, speedMps: 5 } });
+    expectOwn(h, 25, 'forecast', t0 - 1_000);
+    h.clock.t = t0;
+    expectOwn(h, 30, 'forecast');
+    takeoffOwn(h, clean);
+    expectOwn(h, 30, 'hold');
+    h.session().emitMessage({ type: 'approach-sync', classNumber: 1, heatIndex: 0, hardTurn: false, approach: null });
+    expectOwn(h, 0, 'patch'); // the latest patch still says 0 m: no hold survives a sync without an approach
+  });
+
+  it('a new class drops the hold: the own horse is drawn from the new class\'s patch', async () => {
+    const h = await inRound();
+    const t0 = h.clock.now() + 1_000;
+    approachOwn(h, 1, 1, t0, 5);
+    h.clock.t = t0;
+    expectOwn(h, 30, 'forecast');
+    takeoffOwn(h, clean);
+    expectOwn(h, 30, 'hold');
+    await inResults(h);
+    startClass(h, 2);
+    await settle();
+    expectOwn(h, 0, 'patch');
+  });
+
+  it("negative: the other horses are drawn as in K1 — another rider's approach and take-off change nothing of the own horse", async () => {
+    const h = await inRound();
+    patch(h, 12);
+    h.session().emitMessage(roundEvent({ type: 'approach', riderId: 'ana', fence: 1, attempt: 1, t0: h.clock.now() + 500, speedMps: 5 }));
+    expectOwn(h, 12, 'patch');
   });
 });
