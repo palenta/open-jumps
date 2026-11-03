@@ -12,3 +12,4 @@ export * from './rules/pranks.js';
 export * from './rules/emotes.js';
 export * from './rules/course.js';
 export * from './rules/turns.js';
+export * from './i18n/index.js';

@@ -142,6 +142,7 @@ describe('the command queue and the tick', () => {
         engine.enqueue({ riderId: 'ana', receiveTime: 6350, kind: 'line', line: 'center' });
         if (enqueueFirst) engine.enqueue(tapOf('ana', 6400, receiveTime));
         drive(engine, 0, 6699);
+        engine.tick(6699); // the tick that closes 6699 itself (drive stops at 6650): the "after" order really enqueues after it
         if (!enqueueFirst) engine.enqueue(tapOf('ana', 6400, receiveTime));
         return { events: drive(engine, 6699, 7000), rider: engine.snapshot().riders[0]! };
       };

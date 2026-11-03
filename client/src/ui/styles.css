@@ -1,0 +1,75 @@
+/* Open Jumps — the first client build. Landscape phones and tablets, one screen at a time, big touch targets.
+   Placeholder look (plan 1.14 art comes later); the arena fills the safe area so its rectangle is the layout. */
+:root {
+  color-scheme: dark;
+  --bg: #1b1f1b;
+  --panel: rgba(20, 24, 20, 0.82);
+  --ink: #f2f2ea;
+  --muted: #b9bfae;
+  --accent: #2f6b3a;
+  --accent-2: #e9c46a;
+  --danger: #c0392b;
+  --safe-top: env(safe-area-inset-top, 0px);
+  --safe-right: env(safe-area-inset-right, 0px);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+  --safe-left: env(safe-area-inset-left, 0px);
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; background: var(--bg); color: var(--ink); font-family: system-ui, -apple-system, 'Segoe UI', sans-serif; overflow: hidden; -webkit-user-select: none; user-select: none; touch-action: manipulation; }
+#app { height: 100%; }
+button, input, select { font: inherit; }
+button { min-height: 48px; padding: 0 20px; border: 0; border-radius: 12px; background: #3a3f3a; color: var(--ink); }
+button.primary { background: var(--accent); color: #fff; font-weight: 600; }
+button.link { background: transparent; color: var(--muted); text-decoration: underline; }
+button:disabled { opacity: 0.5; }
+input, select { min-height: 44px; padding: 0 12px; border-radius: 10px; border: 1px solid #4a4f4a; background: #262b26; color: var(--ink); }
+label { display: block; margin: 8px 0; }
+h1 { font-size: 1.6rem; margin: 0 0 8px; }
+h2 { font-size: 1.1rem; margin: 16px 0 6px; color: var(--muted); }
+ul, ol { margin: 0; padding-left: 20px; }
+li { margin: 6px 0; }
+li button { min-height: 36px; padding: 0 12px; margin-left: 6px; }
+small { color: var(--muted); }
+em { color: var(--accent-2); font-style: normal; }
+
+.screen { height: 100%; overflow: auto; padding: calc(16px + var(--safe-top)) calc(16px + var(--safe-right)) calc(16px + var(--safe-bottom)) calc(16px + var(--safe-left)); }
+.card { background: var(--panel); border-radius: 16px; padding: 12px 16px; margin: 12px 0; max-width: 560px; }
+.error { color: var(--danger); min-height: 1.2em; }
+.status { color: var(--accent-2); min-height: 1.2em; }
+.ended { color: var(--accent-2); font-weight: 600; }
+.code { font-size: 2.4rem; letter-spacing: 0.2em; font-weight: 700; margin: 4px 0; }
+.hint { color: var(--muted); margin: 0 0 8px; }
+.locale { margin: 8px 0; color: var(--muted); }
+.locale button { min-height: 36px; padding: 0 12px; }
+.start { display: flex; gap: 12px; align-items: center; margin: 16px 0; }
+
+/* The arena and the screens around it */
+.arena { position: absolute; inset: var(--safe-top) var(--safe-right) var(--safe-bottom) var(--safe-left); overflow: hidden; background: #6a8f6a; }
+.arena-canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+.horse-labels { position: absolute; inset: 0; pointer-events: none; }
+.horse-label { position: absolute; transform: translate(-50%, -100%); background: rgba(0, 0, 0, 0.55); color: #fff; padding: 2px 8px; border-radius: 8px; font-size: 0.85rem; white-space: nowrap; }
+.screen.walk, .screen.round { position: relative; padding: 0; overflow: hidden; }
+.arena-slot { position: absolute; inset: 0; }
+.walk-panel { position: absolute; z-index: 2; left: calc(12px + var(--safe-left)); top: calc(12px + var(--safe-top)); max-width: 46%; background: var(--panel); border-radius: 16px; padding: 12px 16px; font-size: 0.95rem; }
+.walk-panel ol { padding-left: 18px; }
+.focus { font-size: 1.4rem; font-weight: 700; color: var(--accent-2); }
+
+/* Controls on the arena (positioned by the layout in arena coordinates) */
+.control { position: absolute; display: flex; align-items: center; justify-content: center; border-radius: 14px; background: rgba(255, 255, 255, 0.14); border: 2px solid rgba(255, 255, 255, 0.35); color: rgba(255, 255, 255, 0.85); font-weight: 600; font-size: 0.9rem; pointer-events: none; }
+.control-tap { border-style: dashed; border-radius: 24px; }
+.control-tap[data-armed="true"] { background: rgba(233, 196, 106, 0.3); border-color: var(--accent-2); color: #fff; }
+.rotate { position: absolute; inset: 0; z-index: 5; display: flex; align-items: center; justify-content: center; background: rgba(0, 0, 0, 0.85); font-size: 1.4rem; text-align: center; padding: 24px; }
+.rotate[hidden] { display: none; }
+
+/* HUD */
+.hud { position: absolute; inset: var(--safe-top) var(--safe-right) var(--safe-bottom) var(--safe-left); pointer-events: none; z-index: 3; }
+.hud-top { position: absolute; top: 8px; left: 50%; transform: translateX(-50%); display: flex; gap: 18px; font-size: 1.5rem; font-weight: 700; text-shadow: 0 1px 3px rgba(0, 0, 0, 0.7); }
+.hud-bottom { position: absolute; bottom: 8px; left: 50%; transform: translateX(-50%); display: flex; gap: 16px; align-items: center; background: var(--panel); border-radius: 12px; padding: 6px 14px; max-width: 70%; }
+[data-hud-caption] { color: var(--accent-2); }
+.badge { position: absolute; top: 8px; left: 8px; background: rgba(192, 57, 43, 0.85); color: #fff; font-size: 0.75rem; padding: 3px 8px; border-radius: 8px; }
+
+/* Results */
+.results table { border-collapse: collapse; margin: 12px 0; min-width: 320px; }
+.results caption { text-align: left; font-weight: 700; margin-bottom: 6px; }
+.results th, .results td { text-align: left; padding: 6px 10px; border-bottom: 1px solid #3a3f3a; }
+.results tr.own td { color: var(--accent-2); }

@@ -1,0 +1,10 @@
+{
+  "name": "Open Jumps",
+  "short_name": "Open Jumps",
+  "start_url": "/",
+  "display": "fullscreen",
+  "orientation": "landscape",
+  "background_color": "#1b1f1b",
+  "theme_color": "#2f6b3a",
+  "icons": []
+}

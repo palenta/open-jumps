@@ -257,6 +257,8 @@ export class LobbyRoom extends Room<{ state: LobbyState }> {
   private readonly timers = new Set<NodeJS.Timeout>();
   private flow: ClassFlow | null = null;
   private classNumber = 0;
+  /** The course of the current class (announced to every client: the arena and the course walk draw it). */
+  private course: CourseSpec | null = null;
   private classId = '';
   /** Riders of the running heat (account ids). */
   private heatRiders = new Set<string>();
@@ -368,6 +370,8 @@ export class LobbyRoom extends Room<{ state: LobbyState }> {
     this.syncDoor();
     this.startClockSync(client);
     if (this.heatRiders.has(accountId)) this.flow?.riderReconnected(accountId, this.serverNow());
+    // A late joiner learns the class in progress: its course (for the arena and the walk) and, once done, the table.
+    if (this.flow !== null && this.course !== null) client.send('class-course', { course: this.course, classNumber: this.classNumber });
     if (this.flow?.phase === 'done' && this.lastTable !== null) client.send('class-table', { table: this.lastTable });
   }
 
@@ -502,8 +506,11 @@ export class LobbyRoom extends Room<{ state: LobbyState }> {
     });
     const timing = deps.timing ? { walkMs: deps.timing.walkMs, resultsMs: deps.timing.resultsMs } : CLASS_TIMING;
     this.flow = new ClassFlow({ classId: this.classId, course, riders, order, mode: 'ranked', seed: this.classId, timing });
+    this.course = course;
     this.heatRiders = new Set();
     this.lastTable = null;
+    // Everyone in the room gets the course before the walk starts (the arena and the course walk draw it).
+    this.broadcast('class-course', { course, classNumber: this.classNumber });
     this.flow.start(this.serverNow());
     if (!this.simulating) {
       this.simulating = true;
