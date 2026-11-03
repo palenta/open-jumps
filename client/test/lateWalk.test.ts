@@ -66,7 +66,7 @@ describe("a late joiner's walk before her clock is measured (audit K1 r2 #3)", (
     await until(() => app.root.dataset.screen === 'walk', 3000, 'her walk screen');
     const focusNow = (): number => {
       app.game.frame(maria.clock.now());
-      return Number(text(app.root.querySelector('[data-focus]')));
+      return Number(text(app.root.querySelector('[data-focus]:not([data-fence-marker])')));
     };
     expect(maria.clock.ready()).toBe(false); // the series has only begun
     expect(focusNow()).toBe(1);

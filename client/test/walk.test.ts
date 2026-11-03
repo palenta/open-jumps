@@ -1,8 +1,12 @@
 // The course walk (reconocimiento, plan 1.7): every fence in order with its type as a term, the class height,
 // the distance from the previous take-off point (from the start line for fence 1), the turn before it, and the
-// time allowed and limit from the shared course rules; the fly-over focuses on one fence after another.
-import { courseTimes, type CourseSpec } from '@open-jumps/shared';
+// time allowed and limit from the shared course rules; the fly-over focuses on one fence after another. K1.1
+// step 4: the map of the route — the track, the fences where the arena stands them, the turn arrows, start and
+// finish — fitted into a box (walkMap).
+import { clubCourse, courseTimes, type CourseSpec } from '@open-jumps/shared';
 import { describe, expect, it } from 'vitest';
+import { buildTrack, fencePose, pointAt } from '../src/scene/track.js';
+import { WALK_MAP, walkMap, type MapBox, type MapPoint, type WalkMap } from '../src/walk/walkMap.js';
 import { walkFocus, walkModel } from '../src/walk/walkModel.js';
 
 const course: CourseSpec = {
@@ -111,5 +115,164 @@ describe('walkFocus', () => {
 
   it('a single fence is the focus throughout', () => {
     expect(walkFocus(10_000, 1, 5_000)).toBe(1);
+  });
+});
+
+// ---- K1.1 step 4: the map of the route ----------------------------------------------------------------------
+
+/** Three fences with a left turn between 1 and 2 and a right turn between 2 and 3. */
+const bothWays: CourseSpec = {
+  id: 'both-ways',
+  version: 1,
+  lengthM: 130,
+  speedMPerMin: 300,
+  fences: [
+    { number: 1, distanceM: 30, type: 'vertical' },
+    { number: 2, distanceM: 64, type: 'oxer' },
+    { number: 3, distanceM: 110, type: 'vertical' },
+  ],
+  turns: [
+    { distanceM: 80, direction: 'right' },
+    { distanceM: 45, direction: 'left' },
+  ],
+};
+
+const close = (a: MapPoint, b: MapPoint, eps = 1e-6): boolean => Math.abs(a.x - b.x) <= eps && Math.abs(a.y - b.y) <= eps;
+const distance = (a: MapPoint, b: MapPoint): number => Math.hypot(a.x - b.x, a.y - b.y);
+
+/** Every point the map draws. */
+const drawn = (map: WalkMap): MapPoint[] => [...map.path, ...map.fences.map((f) => f.at), ...map.turns.map((t) => t.at), map.start, map.finish];
+
+/** The path point nearest to a map point (its index). */
+function nearestIndex(map: WalkMap, point: MapPoint): number {
+  let best = 0;
+  map.path.forEach((p, i) => {
+    if (distance(p, point) < distance(map.path[best] ?? p, point)) best = i;
+  });
+  return best;
+}
+
+/**
+ * How the drawn path turns around a point (the map's y runs downwards): the cross product of the direction before
+ * and after it. Seen from above with y down, a left turn is counter-clockwise on the screen — a negative cross.
+ */
+function turnSense(map: WalkMap, point: MapPoint, spanM = 12): 'left' | 'right' {
+  const i = nearestIndex(map, point);
+  const step = Math.max(1, Math.round(spanM)); // the path is sampled at least every metre
+  const before = map.path[Math.max(0, i - step)];
+  const at = map.path[i];
+  const after = map.path[Math.min(map.path.length - 1, i + step)];
+  if (!before || !at || !after) throw new Error('the path is too short around the point');
+  const d1 = { x: at.x - before.x, y: at.y - before.y };
+  const d2 = { x: after.x - at.x, y: after.y - at.y };
+  return d1.x * d2.y - d1.y * d2.x < 0 ? 'left' : 'right';
+}
+
+describe('walkMap (K1.1 step 4)', () => {
+  it('one marker per fence, in course order, each where the arena stands the fence: the projection of fencePose', () => {
+    const map = walkMap(bothWays);
+    const track = buildTrack(bothWays);
+    expect(map.fences.map((f) => f.number)).toEqual([1, 2, 3]);
+    for (const fence of map.fences) {
+      const pose = fencePose(track, bothWays, fence.number);
+      expect(close(fence.at, map.project(pose)), `fence ${fence.number}`).toBe(true);
+      expect(fence.heading).toBeCloseTo(pose.heading, 9);
+    }
+  });
+
+  it('negative: a fence marker is not at the take-off point — the 1.5 m to the rail comes from fencePose, not from a copy', () => {
+    const map = walkMap(bothWays);
+    const track = buildTrack(bothWays);
+    const takeoff = map.project(pointAt(track, 30));
+    const first = map.fences[0];
+    if (!first) throw new Error('no fence on the map');
+    expect(distance(first.at, takeoff)).toBeCloseTo(1.5 * map.scale, 6);
+  });
+
+  it('one arrow per turn point, in route order, at the turn point, pointing the course\'s way', () => {
+    const map = walkMap(bothWays);
+    const track = buildTrack(bothWays);
+    expect(map.turns.map((t) => [t.distanceM, t.direction])).toEqual([
+      [45, 'left'],
+      [80, 'right'],
+    ]);
+    for (const turn of map.turns) expect(close(turn.at, map.project(pointAt(track, turn.distanceM))), String(turn.distanceM)).toBe(true);
+  });
+
+  it('the drawn track itself turns the way the arrow says, seen from above (a left turn is a left turn on the map)', () => {
+    const map = walkMap(bothWays);
+    for (const turn of map.turns) expect(turnSense(map, turn.at), String(turn.distanceM)).toBe(turn.direction);
+  });
+
+  it('the path follows the track from start to finish, sampled at most every metre', () => {
+    const map = walkMap(bothWays);
+    const track = buildTrack(bothWays);
+    expect(close(map.path[0] ?? { x: Number.NaN, y: 0 }, map.project(pointAt(track, 0)))).toBe(true);
+    expect(close(map.path.at(-1) ?? { x: Number.NaN, y: 0 }, map.project(pointAt(track, bothWays.lengthM)))).toBe(true);
+    expect(map.path.length).toBeGreaterThanOrEqual(bothWays.lengthM / WALK_MAP.maxStepM + 1);
+    for (let i = 1; i < map.path.length; i += 1) {
+      const a = map.path[i - 1];
+      const b = map.path[i];
+      if (!a || !b) throw new Error('a hole in the path');
+      expect(distance(a, b)).toBeLessThanOrEqual(WALK_MAP.maxStepM * map.scale + 1e-9);
+    }
+  });
+
+  it('the start is the beginning of the path and the finish its end', () => {
+    const map = walkMap(bothWays);
+    expect(close(map.start, map.path[0] ?? { x: Number.NaN, y: 0 })).toBe(true);
+    expect(close(map.finish, map.path.at(-1) ?? { x: Number.NaN, y: 0 })).toBe(true);
+    expect(distance(map.start, map.finish)).toBeGreaterThan(0);
+  });
+
+  it('one uniform scale: distances on the map are the ground distances times scale, along both axes', () => {
+    const map = walkMap(bothWays);
+    const a = map.project({ x: 0, z: 0 });
+    expect(distance(a, map.project({ x: 10, z: 0 }))).toBeCloseTo(10 * map.scale, 9);
+    expect(distance(a, map.project({ x: 0, z: 10 }))).toBeCloseTo(10 * map.scale, 9);
+    expect(map.project({ x: 10, z: 0 }).x).toBeGreaterThan(a.x);
+    expect(map.project({ x: 0, z: 10 }).y).toBeGreaterThan(a.y);
+  });
+
+  it.each([
+    { name: 'the default box', box: WALK_MAP.box },
+    { name: 'a narrow panel', box: { width: 180, height: 320, margin: 12 } },
+    { name: 'a wide strip', box: { width: 600, height: 120, margin: 8 } },
+  ] as { name: string; box: MapBox }[])('everything drawn lies inside the margins of $name and fills it along one axis', ({ box }) => {
+    const map = walkMap(bothWays, box);
+    expect(map.box).toEqual(box);
+    const points = drawn(map);
+    for (const p of points) {
+      expect(p.x).toBeGreaterThanOrEqual(box.margin - 1e-6);
+      expect(p.x).toBeLessThanOrEqual(box.width - box.margin + 1e-6);
+      expect(p.y).toBeGreaterThanOrEqual(box.margin - 1e-6);
+      expect(p.y).toBeLessThanOrEqual(box.height - box.margin + 1e-6);
+    }
+    const spanX = Math.max(...points.map((p) => p.x)) - Math.min(...points.map((p) => p.x));
+    const spanY = Math.max(...points.map((p) => p.y)) - Math.min(...points.map((p) => p.y));
+    const fillsX = Math.abs(spanX - (box.width - 2 * box.margin)) <= 1e-6;
+    const fillsY = Math.abs(spanY - (box.height - 2 * box.margin)) <= 1e-6;
+    expect(fillsX || fillsY).toBe(true);
+  });
+
+  it('a generated club course of eight fences: eight markers in order, every turn with its direction, all inside the box', () => {
+    const club = clubCourse('walk-map', 8);
+    const map = walkMap(club);
+    expect(map.fences.map((f) => f.number)).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
+    expect(map.turns.map((t) => t.direction)).toEqual([...club.turns].sort((a, b) => a.distanceM - b.distanceM).map((t) => t.direction));
+    for (const turn of map.turns) expect(turnSense(map, turn.at), String(turn.distanceM)).toBe(turn.direction);
+    for (const p of drawn(map)) {
+      expect(p.x).toBeGreaterThanOrEqual(WALK_MAP.box.margin - 1e-6);
+      expect(p.y).toBeLessThanOrEqual(WALK_MAP.box.height - WALK_MAP.box.margin + 1e-6);
+    }
+  });
+
+  it('a course without turns has no arrows and a straight path', () => {
+    const map = walkMap(course.turns.length === 0 ? course : { ...course, turns: [] });
+    expect(map.turns).toEqual([]);
+    const first = map.path[0];
+    const last = map.path.at(-1);
+    if (!first || !last) throw new Error('no path');
+    for (const p of map.path) expect(Math.abs((p.x - first.x) * (last.y - first.y) - (p.y - first.y) * (last.x - first.x))).toBeLessThan(1e-6);
   });
 });

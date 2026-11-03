@@ -212,6 +212,14 @@ interface RoundModules {
  *   ms and read through the clock at every frame and every clock ping: a late joiner whose clock is not measured
  *   yet sees fence 1 for the moment, then the fence of the server's window and its end at the server's deadline —
  *   never a walk restarted at the join (audit K1 r2 #3).
+ *   K1.1 step 4 — the map of the route: the walk screen draws svg[data-walk-map] from walkMap(course) (walkMap.ts)
+ *   with aria-label = translate('walk.map.label'): the track as a line, one [data-fence-marker="N"] per fence in
+ *   course order, one [data-turn-marker="left"|"right"] arrow per turn point in route order, and the start and finish
+ *   marks [data-walk-start] / [data-walk-finish] with the texts translate('walk.map.start') / ('walk.map.finish').
+ *   The fence of the fly-over's focus (the same walkFocus as [data-focus], at every frame and clock ping) carries
+ *   data-focus="true" on its marker — exactly one marker at a time. The legend is [data-list="fences"] as before,
+ *   compact beside the map; the number in the [data-focus] element outside the map stays. The 3D fly-over may stay
+ *   behind as a background or go — the map must read on its own. No control is shown on the walk (step 3).
  * - round: the layout is layoutFor(rect.width, rect.height) of the MEASURED arena rectangle (deps.measure, by
  *   default getBoundingClientRect(); re-measured by resize() and on the window 'resize' event). The four controls
  *   are drawn as [data-control="turn-left"|"turn-right"|"gear"|"tap"], absolutely positioned INSIDE the arena with

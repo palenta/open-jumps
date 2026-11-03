@@ -4,7 +4,7 @@
 // happy-dom for the document, a scripted API, a scripted room session, a recording scene, a settable clock and
 // window — and pinned through the DOM contract in game.ts (data attributes, pointerdown on the arena, the
 // lifecycle events, the round modules re-created per class-course).
-import { caption as captionOf, isMessageKey, PACKET, translateKey, type ApproachState, type CourseSpec, type Locale, type TakeoffOutcome } from '@open-jumps/shared';
+import { caption as captionOf, clubCourse, isMessageKey, PACKET, translateKey, type ApproachState, type CourseSpec, type Locale, type TakeoffOutcome } from '@open-jumps/shared';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   createGame,
@@ -1177,7 +1177,7 @@ describe('the course walk', () => {
     const fences = [...q(h.root, '[data-list="fences"]').querySelectorAll('li')];
     expect(fences).toHaveLength(1);
     expect(text(fences[0] ?? null)).toContain('Fence 1: vertical');
-    expect(text(h.root.querySelector('[data-focus]'))).toBe('1');
+    expect(text(h.root.querySelector('[data-focus]:not([data-fence-marker])'))).toBe('1');
   });
 
   it('a frame during the walk renders the walk with the focused fence', async () => {
@@ -1205,7 +1205,7 @@ describe("the fly-over follows the server's walk window (audit K1 r1 #6)", () =>
     expect(h.root.dataset.screen).toBe('walk');
   }
 
-  const focusShown = (h: Harness): string => text(h.root.querySelector('[data-focus]'));
+  const focusShown = (h: Harness): string => text(h.root.querySelector('[data-focus]:not([data-fence-marker])'));
   const focusDrawn = (h: Harness): number | null => {
     h.game.frame(h.clock.now());
     return h.scene.frames.at(-1)?.focusFence ?? null;
@@ -1311,7 +1311,7 @@ describe('a late joiner whose clock is not measured yet (audit K1 r2 #3)', () =>
     }
   }
 
-  const focusShown = (h: Harness): string => text(h.root.querySelector('[data-focus]'));
+  const focusShown = (h: Harness): string => text(h.root.querySelector('[data-focus]:not([data-fence-marker])'));
   const focusDrawn = (h: Harness, now: number): number | null => {
     h.game.frame(now);
     return h.scene.frames.at(-1)?.focusFence ?? null;
@@ -2607,5 +2607,93 @@ describe('the course walk has no controls (K1.1 step 3)', () => {
     await settle();
     expect(h.root.dataset.screen).toBe('round');
     for (const name of ['turn-left', 'turn-right', 'gear', 'tap'] as const) expect(shown(control(h, name)), name).toBe(true);
+  });
+});
+
+describe('the course map on the walk screen (K1.1 step 4)', () => {
+  /** Three fences, a left turn between 1 and 2 and a right turn between 2 and 3. */
+  const bothWays: CourseSpec = {
+    id: 'both-ways',
+    version: 1,
+    lengthM: 130,
+    speedMPerMin: 300,
+    fences: [
+      { number: 1, distanceM: 30, type: 'vertical' },
+      { number: 2, distanceM: 64, type: 'oxer' },
+      { number: 3, distanceM: 110, type: 'vertical' },
+    ],
+    turns: [
+      { distanceM: 45, direction: 'left' },
+      { distanceM: 80, direction: 'right' },
+    ],
+  };
+
+  /** The host on the walk of `course` (class 1, heat 0), its window starting now and `walkMs` long. */
+  async function walkingOver(walkMs = 6_000, over: CourseSpec = bothWays): Promise<Harness> {
+    const h = await hostInLobby();
+    h.session().emitMessage({ type: 'class-course', course: over, classNumber: 1 });
+    h.session().emitMessage(phaseMessage('walk', 0, h.clock.now(), h.clock.now() + walkMs));
+    h.session().emitState(snapshot({ phase: 'walk', heatIndex: 0 }));
+    await settle();
+    expect(h.root.dataset.screen).toBe('walk');
+    return h;
+  }
+
+  const map = (h: Harness): Element => q(h.root, '[data-walk-map]');
+  const fenceMarkers = (h: Harness): string[] => [...map(h).querySelectorAll('[data-fence-marker]')].map((m) => m.getAttribute('data-fence-marker') ?? '');
+  const turnMarkers = (h: Harness): string[] => [...map(h).querySelectorAll('[data-turn-marker]')].map((m) => m.getAttribute('data-turn-marker') ?? '');
+  const focused = (h: Harness): string[] =>
+    [...map(h).querySelectorAll('[data-fence-marker][data-focus="true"]')].map((m) => m.getAttribute('data-fence-marker') ?? '');
+
+  it('the walk draws the map as an SVG: one marker per fence in course order, one arrow per turn in route order with its direction', async () => {
+    const h = await walkingOver();
+    expect(map(h).tagName.toLowerCase()).toBe('svg');
+    expect(fenceMarkers(h)).toEqual(['1', '2', '3']);
+    expect(turnMarkers(h)).toEqual(['left', 'right']);
+  });
+
+  it('the legend stays: [data-list="fences"] lists every fence beside the map', async () => {
+    const h = await walkingOver();
+    const items = [...q(h.root, '[data-list="fences"]').querySelectorAll('li')];
+    expect(items).toHaveLength(3);
+    expect(text(items[1] ?? null)).toContain('Fence 2: óxer');
+  });
+
+  it('the focus of the fly-over moves along the map: exactly one marker is data-focus="true", fence 1 → 2 → 3 over the server\'s window', async () => {
+    const h = await walkingOver(6_000);
+    h.game.frame(h.clock.now());
+    expect(focused(h)).toEqual(['1']);
+    h.clock.t += 2_500;
+    h.game.frame(h.clock.now());
+    expect(focused(h)).toEqual(['2']);
+    h.clock.t += 2_000;
+    h.game.frame(h.clock.now());
+    expect(focused(h)).toEqual(['3']);
+  });
+
+  it('the map is named and its start and finish are labelled in the locale, Spanish after the switch', async () => {
+    const h = await walkingOver();
+    expect(map(h).getAttribute('aria-label')).toBe(localized('en', 'walk.map.label'));
+    expect(text(q(h.root, '[data-walk-start]'))).toBe(localized('en', 'walk.map.start'));
+    expect(text(q(h.root, '[data-walk-finish]'))).toBe(localized('en', 'walk.map.finish'));
+    click(h.root, '[data-action="locale"][data-locale="es"]');
+    expect(map(h).getAttribute('aria-label')).toBe(localized('es', 'walk.map.label'));
+    expect(text(q(h.root, '[data-walk-start]'))).toBe(localized('es', 'walk.map.start'));
+    expect(fenceMarkers(h)).toEqual(['1', '2', '3']);
+  });
+
+  it('a club course of eight fences: eight markers on the map', async () => {
+    const h = await hostInLobby();
+    const club = clubCourse('screen-map', 8);
+    h.session().emitMessage({ type: 'class-course', course: club, classNumber: 1 });
+    h.session().emitState(snapshot({ phase: 'walk', heatIndex: 0 }));
+    await settle();
+    expect(fenceMarkers(h)).toEqual(['1', '2', '3', '4', '5', '6', '7', '8']);
+    expect(turnMarkers(h)).toEqual([...club.turns].sort((a, b) => a.distanceM - b.distanceM).map((turn) => turn.direction));
+  });
+
+  it('negative: the round screen has no map', async () => {
+    const h = await inRound();
+    expect(h.root.querySelector('[data-walk-map]')).toBeNull();
   });
 });
