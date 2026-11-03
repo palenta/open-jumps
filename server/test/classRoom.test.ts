@@ -1079,6 +1079,89 @@ describe('a rider admitted over HTTP who never connected rides in a class her po
   }, 30000);
 });
 
+describe('a profile read that fails no longer matters once nobody needs it (audit K1 r4 #3)', () => {
+  /** getPublicProfile held at a gate, then failing: the read of the start is in flight until the test lets it fail. */
+  function failingReadAtGate(): { accounts: { getPublicProfile: (id: string) => Promise<unknown> }; original: (id: string) => Promise<unknown>; fail: () => void; reads: string[] } {
+    const accounts = services.accounts as unknown as { getPublicProfile: (id: string) => Promise<unknown> };
+    const original = accounts.getPublicProfile;
+    let fail: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => (fail = resolve));
+    const reads: string[] = [];
+    accounts.getPublicProfile = async (id: string) => {
+      reads.push(id);
+      await gate;
+      throw new Error('storage unavailable (test)');
+    };
+    return { accounts, original, fail, reads };
+  }
+
+  for (const how of ['kicked', 'left'] as const) {
+    it(`the rider whose profile is being read ${how === 'kicked' ? 'is kicked' : 'leaves the room'} meanwhile, then the read fails: the class starts without her`, async () => {
+      const { entry, room, riders } = await openRoom(2);
+      const [host, absent] = riders as [Rider, Rider];
+      const hostSeat = await sit(room.roomId, entry.code, host.token, host.account.id);
+      const read = failingReadAtGate();
+      try {
+        hostSeat.client.send('room', { type: 'start-class', order: 'random' });
+        await until(() => read.reads.includes(absent.account.id), 2000, 'the read of her profile');
+        if (how === 'kicked') services.rooms.hostAction(entry.code, host.account.id, { type: 'kick', accountId: absent.account.id });
+        else services.rooms.leave(entry.code, absent.account.id);
+        read.fail();
+        await until(() => hostSeat.client.state.phase === 'walk' || refusals(hostSeat).length > 0, 3000, 'the start or its refusal');
+        expect(refusals(hostSeat)).toEqual([]);
+        expect(hostSeat.client.state.phase).toBe('walk');
+        await until(() => hostSeat.client.state.phase === 'riding', 5000, "phase 'riding'");
+        expect([...hostSeat.client.state.riders.keys()]).toEqual([host.account.id]);
+      } finally {
+        read.accounts.getPublicProfile = read.original;
+      }
+      await hostSeat.client.leave();
+    }, 30000);
+  }
+
+  it('the rider connects while her profile is being read (onAuth brings it), then the read fails: the class starts with her, named from her own connection', async () => {
+    const { entry, room, riders } = await openRoom(2);
+    const [host, absent] = riders as [Rider, Rider];
+    const hostSeat = await sit(room.roomId, entry.code, host.token, host.account.id);
+    const read = failingReadAtGate();
+    try {
+      hostSeat.client.send('room', { type: 'start-class', order: 'random' });
+      await until(() => read.reads.includes(absent.account.id), 2000, 'the read of her profile');
+      const absentSeat = await sit(room.roomId, entry.code, absent.token, absent.account.id);
+      await until(() => hostSeat.client.state.participants.get(absent.account.id)?.riderName === absent.account.riderName, 2000, 'her connection seated');
+      read.fail();
+      await until(() => hostSeat.client.state.phase === 'walk' || refusals(hostSeat).length > 0, 3000, 'the start or its refusal');
+      expect(refusals(hostSeat)).toEqual([]);
+      expect(hostSeat.client.state.phase).toBe('walk');
+      await until(() => hostSeat.client.state.phase === 'riding', 5000, "phase 'riding'");
+      expect(hostSeat.client.state.riders.get(absent.account.id)).toMatchObject({ riderName: absent.account.riderName, ponyName: 'Dakota', heightClass: 70 });
+      await absentSeat.client.leave();
+    } finally {
+      read.accounts.getPublicProfile = read.original;
+    }
+    await hostSeat.client.leave();
+  }, 30000);
+
+  it('a rider still admitted whose profile is still unknown when the read fails: the start is refused and nothing starts (the guard stays)', async () => {
+    const { entry, room, riders } = await openRoom(2);
+    const [host, absent] = riders as [Rider, Rider];
+    const hostSeat = await sit(room.roomId, entry.code, host.token, host.account.id);
+    const read = failingReadAtGate();
+    try {
+      hostSeat.client.send('room', { type: 'start-class', order: 'random' });
+      await until(() => read.reads.includes(absent.account.id), 2000, 'the read of her profile');
+      read.fail();
+      await until(() => refusals(hostSeat).length > 0, 2000, 'the refusal');
+      expect(refusals(hostSeat)).toEqual(['class-not-ready']);
+      await sleep(200);
+      expect(hostSeat.client.state.phase).toBe('lobby');
+    } finally {
+      read.accounts.getPublicProfile = read.original;
+    }
+    await hostSeat.client.leave();
+  }, 30000);
+});
+
 describe("the results boundary says whether another heat follows (audit K1 r3 #6)", () => {
   /** Every (phase, heat, nextHeat) the host's state goes through, in order, without repeats. */
   function phaseLog(seat: Seat): string[] {

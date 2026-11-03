@@ -47,7 +47,10 @@ export interface LobbyRoomDeps {
  *   are read from the accounts first, and a participant without settings (or with a class her category does not
  *   allow any more) gets the default below — never a class of no category (audit K1 r3 #2). This preparation is
  *   asynchronous: from the start-class until the class is built a second start-class is refused ('class-running'),
- *   and when a profile cannot be read the start is refused ('class-not-ready') and nothing starts.
+ *   and when a profile cannot be read the start is refused ('class-not-ready') and nothing starts — judged once the
+ *   read is over, against the room as it is then: only a participant still admitted whose profile is still unknown
+ *   blocks the start; one kicked or gone meanwhile, or one whose own connection brought her profile (onAuth), does
+ *   not (audit K1 r4 #3).
  * - Clock: on every join the room sends CLOCK_PING_COUNT 'clock-ping' { serverSent } messages (CLOCK_PING_EVERY_MS
  *   apart); the client answers 'clock-pong' { serverSent, clientTime }; rider commands carry clientTime and are
  *   translated with that session's ClockSync — until it is ready they are refused ('clock-not-ready'). Each time the
@@ -108,8 +111,8 @@ export interface LobbyRoomDeps {
  * Refusal codes sent as 'refused' { error }: 'not-riding' (a rider command outside 'riding' or from someone not
  * in the running heat), 'clock-not-ready', 'height-not-allowed' (not a class of the sender's pony category),
  * 'class-running' (start-class during a class, or while the previous start-class is still being prepared),
- * 'class-not-ready' (start-class while a participant's profile cannot be read; nothing starts, the host may try
- * again), plus B1's 'host-only' / 'not-participant' / 'not-available'.
+ * 'class-not-ready' (start-class while the profile of a participant still admitted and still unknown cannot be read;
+ * nothing starts, the host may try again), plus B1's 'host-only' / 'not-participant' / 'not-available'.
  * Defaults: a participant's height class is the lowest class allowed for their pony category; assists are off.
  */
 export const CLASS_PROTOCOL = {
@@ -757,7 +760,10 @@ export class LobbyRoom extends Room<{ state: LobbyState }> {
    * autopilot) is unknown to onAuth, so her profile — names and pony category, hence her default class — is read from
    * the accounts before the class is built. The list is read again after every wait (a kick, a leave or an admission
    * may land meanwhile) until every participant on it is known. Null when a profile cannot be read (storage trouble,
-   * or no such account): the class must not start with a rider of unknown category.
+   * or no such account) for a participant who still needs it: the class must not start with a rider of unknown
+   * category. A failed read is judged against the room as it is AFTER the wait (audit K1 r4 #3): it refuses the start
+   * only when its rider is still admitted and her profile is still unknown — one kicked or gone meanwhile is no
+   * participant any more, and one who connected meanwhile is known from her own onAuth.
    */
   private async prepareParticipants(): Promise<string[] | null> {
     for (;;) {
@@ -767,16 +773,25 @@ export class LobbyRoom extends Room<{ state: LobbyState }> {
       const missing = participants.filter((id) => !this.profiles.has(id));
       if (missing.length === 0) return participants;
       const read = await Promise.allSettled(missing.map((id) => this.deps().accounts.getPublicProfile(id)));
+      const failed = new Set<string>();
       for (const [index, outcome] of read.entries()) {
         const accountId = missing[index];
         if (accountId === undefined) continue;
-        if (outcome.status !== 'fulfilled' || outcome.value === null) return null;
+        if (outcome.status !== 'fulfilled' || outcome.value === null) {
+          failed.add(accountId);
+          continue;
+        }
         // A connection that landed meanwhile brought a fresher profile (onAuth): keep that one.
         if (!this.profiles.has(accountId)) {
           const profile = outcome.value;
           this.profiles.set(accountId, { riderName: profile.riderName, ponyName: profile.ponyName, ponyCategory: profile.ponyCategory });
         }
       }
+      // The room as it is now, after the wait (audit K1 r4 #3): a failed read matters only for a rider still admitted
+      // and still unknown. Everyone else on the new list is taken on the next turn (read, if newly admitted).
+      const now = this.entry();
+      if (!now) return null;
+      if ([...now.admission.participants].some((id) => failed.has(id) && !this.profiles.has(id))) return null;
     }
   }
 
