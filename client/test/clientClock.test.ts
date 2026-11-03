@@ -1,6 +1,7 @@
-// Plan 2.3: the client's estimate of the server clock feeds only the instant hint — the median offset
-// (server − client) of the newest ping series, trusted after three samples, the newest eight counted, a
-// stalled series never blanking a working estimate. The server measures the real offset itself.
+// Plan 2.3: the client's view of the server clock — what the lit tap zone, the instant hint and the course walk
+// translate with. The server's own measurement, once it announces it ('clock-offset', audit K1 r3 #5), is the
+// translation; before it, the median offset (server − client) of the newest ping series, trusted after three
+// samples, the newest eight counted, a stalled series never blanking a working estimate.
 import { describe, expect, it } from 'vitest';
 import { CLIENT_CLOCK, ClientClock } from '../src/net/clientClock.js';
 
@@ -153,5 +154,46 @@ describe('ClientClock', () => {
       d.tick(200);
     }
     expect(d.clock.offset()).toBe(5010);
+  });
+});
+
+describe("ClientClock with the server's own offset (audit K1 r3 #5)", () => {
+  it("once the server's offset (its ClockSync.offsetMs, client − server) is heard it is the translation, exactly as the server translates", () => {
+    const d = device(10_000);
+    series(d, [5000, 5000, 5000]); // the own estimate: server 5000 ahead, biased by the one-way delay
+    expect(d.clock.offset()).toBe(5000);
+    d.clock.onServerOffset(-4980); // the server measured client − server = −4980 (mid-point of the round trip)
+    expect(d.clock.offset()).toBe(4980);
+    expect(d.clock.toServer(10_400)).toBe(10_400 + 4980); // = 10 400 − (−4980): the server's toServerTime
+    expect(d.clock.toClient(15_380)).toBe(10_400);
+    expect(d.clock.ready()).toBe(true);
+  });
+
+  it("later pings never move it (the own estimate counts only until the server's is known); a newer server offset replaces it", () => {
+    const d = device(10_000);
+    series(d, [5000, 5000, 5000]);
+    d.clock.onServerOffset(-4980);
+    d.tick(1500);
+    series(d, [7000, 7000, 7000]);
+    expect(d.clock.offset()).toBe(4980);
+    d.clock.onServerOffset(-4990.5);
+    expect(d.clock.offset()).toBe(4990.5);
+    expect(d.clock.toServer(1000)).toBe(5990.5);
+  });
+
+  it("the server's offset alone makes the clock ready (no own series yet)", () => {
+    const d = device(10_000);
+    expect(d.clock.ready()).toBe(false);
+    d.clock.onServerOffset(250);
+    expect(d.clock.ready()).toBe(true);
+    expect(d.clock.toServer(10_000)).toBe(9_750);
+  });
+
+  it('a value that is not a finite number is ignored', () => {
+    const d = device(10_000);
+    series(d, [5000, 5000, 5000]);
+    d.clock.onServerOffset(Number.NaN);
+    d.clock.onServerOffset(Number.POSITIVE_INFINITY);
+    expect(d.clock.offset()).toBe(5000);
   });
 });

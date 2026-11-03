@@ -13,6 +13,7 @@ import {
   type TakeoffOutcome,
 } from '@open-jumps/shared';
 import { describe, expect, it } from 'vitest';
+import { ClockSync } from '../../server/src/round/clockSync.js';
 import { CourseRunner, RUN, type RunnerEvent } from '../../server/src/round/courseRunner.js';
 import { ClientClock } from '../src/net/clientClock.js';
 import { InstantHint, type Hint, type HintContext } from '../src/round/hint.js';
@@ -310,6 +311,83 @@ describe('InstantHint against the server judge: a hard turn, a refusal, the retr
     const thirdVerdict = drive(runner, hint, 27_000, t0 + 200).find((e) => e.type === 'takeoff');
     expect(thirdVerdict).toMatchObject({ fence: 3, outcome: { kind: 'clean' }, approach: { recentHardTurn: false } });
     expect(third?.outcome.kind).toBe('clean');
+  });
+});
+
+describe('InstantHint against the server judge with an asymmetric round trip, at the edge of the window (audit K1 r3 #5)', () => {
+  /** One fence at 30 m on the club course: collected canter 5 m/s, t0 = 6000 server ms. */
+  const course: CourseSpec = { id: 'hint-vs-judge-clock', version: 1, lengthM: 50, speedMPerMin: 300, fences: [{ number: 1, distanceM: 30, type: 'vertical' }], turns: [] };
+  /** The device runs 5 s ahead of the server; a ping takes 2 ms down, its pong 40 ms up. */
+  const SKEW_MS = 5000;
+  const DOWN_MS = 2;
+  const UP_MS = 40;
+
+  /**
+   * The room's clock series between this device and the server: 8 pings 200 ms apart from server time 1000. The device
+   * answers each at once (the session does); the server keeps its ClockSync; every refined offset it would announce
+   * ('clock-offset') is heard by the device — or not, to see what the device's own estimate alone gives.
+   */
+  function measured(announce: boolean): { client: ClientClock; server: ClockSync } {
+    let deviceNow = 0;
+    const client = new ClientClock(() => deviceNow);
+    const server = new ClockSync();
+    for (let i = 0; i < 8; i += 1) {
+      const serverSent = 1000 + i * 200;
+      deviceNow = serverSent + DOWN_MS + SKEW_MS;
+      const pong = client.onPing(serverSent);
+      server.addSample({ serverSent, clientTime: pong.clientTime, serverReceived: serverSent + DOWN_MS + UP_MS });
+      const offset = server.offsetMs;
+      if (announce && offset !== null) client.onServerOffset(offset);
+    }
+    return { client, server };
+  }
+
+  /** The runner to its approach of fence 1; a tap `lateMs` after the take-off moment the device shows; both verdicts. */
+  function tapAtEdge(clock: { client: ClientClock; server: ClockSync }, lateMs: number) {
+    const runner = new CourseRunner({ riderId: 'r1', course, heightClass: 70, rules: RANKED_NO_ASSISTS, seed: 'seed', startAt: 0 });
+    const hint = new InstantHint(clock.client, context70);
+    let approach: Extract<RunnerEvent, { type: 'approach' }> | undefined;
+    for (let t = RUN.tickMs; t <= 5000; t += RUN.tickMs) {
+      for (const event of runner.tick(t)) if (event.type === 'approach') approach = event;
+    }
+    if (!approach) throw new Error('no approach');
+    hint.approach(approach);
+    const shownAt = clock.client.toClient(approach.t0); // data-takeoff-at
+    if (shownAt === null) throw new Error('the clock is not ready');
+    const tapAt = shownAt + lateMs; // the finger, in device time
+    const shown = hint.tap(tapAt);
+    const actionTime = clock.server.toServerTime(tapAt);
+    if (actionTime === null) throw new Error('the server clock is not ready');
+    runner.tap({ actionTime, receiveTime: actionTime + UP_MS, fence: 1, attempt: 1 });
+    let verdict: Extract<RunnerEvent, { type: 'takeoff' }> | undefined;
+    for (let t = 5000 + RUN.tickMs; t <= approach.t0 + 800; t += RUN.tickMs) {
+      for (const event of runner.tick(t)) if (event.type === 'takeoff') verdict = event;
+    }
+    if (!verdict) throw new Error('no verdict');
+    return { shown, verdict };
+  }
+
+  it("the device announced the server's offset: the zone and the hint use the judge's translation — a tap 1 ms past the clean window is a rail for both", () => {
+    const clock = measured(true);
+    expect(clock.server.rttMs).toBe(DOWN_MS + UP_MS);
+    for (const t of [0, 6000, 123_456.5]) expect(clock.client.toServer(t)).toBeCloseTo(clock.server.toServerTime(t) ?? Number.NaN, 9);
+    const edge = windowForAttempt(assumed(), RANKED_NO_ASSISTS).cleanMs;
+    const { shown, verdict } = tapAtEdge(clock, edge + 1);
+    expect(verdict.offsetMs).toBeCloseTo(edge + 1, 6);
+    expect(verdict.outcome.kind).toBe('chip');
+    expect(shown?.offsetMs).toBeCloseTo(edge + 1, 6);
+    expect(shown?.outcome).toEqual(verdict.outcome);
+    // And just inside the perfect window both say perfecta.
+    const perfect = windowForAttempt(assumed(), RANKED_NO_ASSISTS).perfectMs;
+    const inside = tapAtEdge(clock, perfect);
+    expect(inside.verdict.outcome.kind).toBe('perfect');
+    expect(inside.shown?.outcome).toEqual(inside.verdict.outcome);
+  });
+
+  it("without it the device's own estimate is rtt/2 off — the very disagreement the smoke route saw (the hint said clean, the judge a rail)", () => {
+    const clock = measured(false);
+    const own = clock.client.toServer(0) ?? Number.NaN;
+    expect(Math.abs(own - (clock.server.toServerTime(0) ?? Number.NaN))).toBeCloseTo((DOWN_MS + UP_MS) / 2, 6);
   });
 });
 

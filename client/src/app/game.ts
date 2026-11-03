@@ -547,8 +547,10 @@ export function createGame(deps: GameDeps): Game {
         }
         break;
       case 'clock-ping':
-        // The session fed the ping to the clock before handing it on: what is drawn from server times (the walk's
-        // focus, the take-off moment) follows the new reading at once (audit K1 r2 #3).
+      case 'clock-offset':
+        // The session fed the ping (or the server's own offset, audit K1 r3 #5) to the clock before handing it on: what
+        // is drawn from server times (the walk's focus, the take-off moment) follows the new reading at once (audit K1
+        // r2 #3).
         updateHud();
         break;
       case 'emote':

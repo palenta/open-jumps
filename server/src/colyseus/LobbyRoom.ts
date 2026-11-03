@@ -50,7 +50,12 @@ export interface LobbyRoomDeps {
  *   and when a profile cannot be read the start is refused ('class-not-ready') and nothing starts.
  * - Clock: on every join the room sends CLOCK_PING_COUNT 'clock-ping' { serverSent } messages (CLOCK_PING_EVERY_MS
  *   apart); the client answers 'clock-pong' { serverSent, clientTime }; rider commands carry clientTime and are
- *   translated with that session's ClockSync — until it is ready they are refused ('clock-not-ready').
+ *   translated with that session's ClockSync — until it is ready they are refused ('clock-not-ready'). Each time the
+ *   session's active measurement is set (a series became ready) or refined (a further sample moved its median), the
+ *   room sends that connection — and only it — 'clock-offset' { offsetMs }: the active ClockSync.offsetMs, client −
+ *   server (a clientTime c is judged at c − offsetMs). The client translates with it from then on, so the lit tap
+ *   zone and the instant hint read the judge's own translation and never one biased by the one-way delay (audit K1
+ *   r3 #5). An unchanged value is not sent again.
  * - Phases in the state: 'lobby' → 'walk' → 'riding' → 'results' (per heat) → 'done'; 'class-phase' is also sent
  *   as a message { phase, heatIndex, startedAt, endsAt } with the server's clock: when the phase began and when
  *   its timer ends (walk, results; null for riding and done), so a client paces the course walk from the server's
@@ -289,7 +294,7 @@ export class LobbyRoom extends Room<{ state: LobbyState }> {
    * being measured now (at every join and every course walk, plan 2.3); a series replaces the active one only once
    * it is ready, so unanswered series never discard a usable offset.
    */
-  private readonly clocks = new Map<string, { active: ClockSync | null; pending: ClockSync | null }>();
+  private readonly clocks = new Map<string, { active: ClockSync | null; pending: ClockSync | null; announced: number | null }>();
   private readonly timers = new Set<NodeJS.Timeout>();
   private flow: ClassFlow | null = null;
   private classNumber = 0;
@@ -516,7 +521,7 @@ export class LobbyRoom extends Room<{ state: LobbyState }> {
 
   /** Send a fresh ping series; its samples replace the active offset only once the new series is ready. */
   private startClockSync(client: Client): void {
-    const clocks = this.clocks.get(client.sessionId) ?? { active: null, pending: null };
+    const clocks = this.clocks.get(client.sessionId) ?? { active: null, pending: null, announced: null };
     clocks.pending = new ClockSync();
     this.clocks.set(client.sessionId, clocks);
     for (let i = 0; i < CLASS_PROTOCOL.clockPingCount; i += 1) {
@@ -533,9 +538,12 @@ export class LobbyRoom extends Room<{ state: LobbyState }> {
     return this.clocks.get(sessionId)?.active ?? null;
   }
 
-  /** A pong feeds the series being measured; once that series is ready it becomes the active measurement. */
-  private clockPong(sessionId: string, serverSent: number, clientTime: number): void {
-    const clocks = this.clocks.get(sessionId);
+  /**
+   * A pong feeds the series being measured; once that series is ready it becomes the active measurement. Whenever the
+   * active offset is new or has moved, the client is told it ('clock-offset', audit K1 r3 #5).
+   */
+  private clockPong(client: Client, serverSent: number, clientTime: number): void {
+    const clocks = this.clocks.get(client.sessionId);
     if (!clocks) return;
     const target = clocks.pending ?? clocks.active;
     if (!target) return;
@@ -543,6 +551,11 @@ export class LobbyRoom extends Room<{ state: LobbyState }> {
     if (clocks.pending && clocks.pending.ready) {
       clocks.active = clocks.pending;
       clocks.pending = null;
+    }
+    const offsetMs = clocks.active?.offsetMs ?? null;
+    if (offsetMs !== null && offsetMs !== clocks.announced) {
+      clocks.announced = offsetMs;
+      client.send('clock-offset', { offsetMs });
     }
   }
 
@@ -921,7 +934,7 @@ export class LobbyRoom extends Room<{ state: LobbyState }> {
         break;
       }
       case 'clock-pong':
-        this.clockPong(client.sessionId, message.serverSent, message.clientTime);
+        this.clockPong(client, message.serverSent, message.clientTime);
         break;
       default:
         break;

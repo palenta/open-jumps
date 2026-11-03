@@ -5,10 +5,12 @@
 import { matchMaker } from 'colyseus';
 import type { LobbyState } from '../../server/src/colyseus/LobbyRoom.js';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { RoomSession, type SessionStatus } from '../src/net/roomSession.js';
+import { RoomSession, type RoomLike, type SdkLike, type SessionStatus } from '../src/net/roomSession.js';
 import { KICKED_CLOSE_CODE, type RoundEventWire, type ServerMessage } from '../src/net/types.js';
 import { bootApp, LIVE_COURSE, newDevice, sleep, TIMING, until, type Device, type LiveApp } from './helpers.js';
 
+/** Long enough after the last ping of a series for its pong (held 40 ms) and the server's answer to land. */
+const CLASS_PING_TAIL_MS = 300;
 /** An application close code that is a plain drop to the server (anything but consented 4000, kicked 4100, revoked 4101). */
 const DROP_CODE = 4005;
 /** A close the SDK treats as a drop it may recover from by itself (GOING_AWAY). */
@@ -291,4 +293,43 @@ describe('RoomSession', () => {
     expect(seat.session.status).toBe('ended');
     expect(seat.session.end?.kind).toBe('lost');
   }, 25000);
+});
+
+/** The device's SDK with a slow up-link for the clock: every 'clock-pong' leaves `delayMs` late (other messages at once). */
+function slowPongs(sdk: SdkLike, delayMs: number): SdkLike {
+  const wrap = (room: RoomLike): RoomLike => {
+    const send = room.send.bind(room);
+    room.send = (type, payload) => {
+      if ((payload as { type?: unknown } | undefined)?.type === 'clock-pong') setTimeout(() => send(type, payload), delayMs);
+      else send(type, payload);
+    };
+    return room;
+  };
+  return {
+    joinById: async (roomId, options) => wrap(await sdk.joinById(roomId, options)),
+    reconnect: async (token) => wrap(await sdk.reconnect(token)),
+  };
+}
+
+describe("the device translates time with the server's own clock measurement (audit K1 r3 #5)", () => {
+  it('pongs held 40 ms on the way up: after the series the device\'s toServer(t) is the server\'s toServerTime(t) within 1 ms (its own estimate would be ~rtt/2 off)', async () => {
+    const host = await newDevice(live, 'SyncHost', 5000);
+    const { code, roomId } = await openRoom(host);
+    const session = new RoomSession({ sdk: slowPongs(host.sdk(), 40), clock: host.clock });
+    const messages: ServerMessage[] = [];
+    session.onMessage((m) => messages.push(m));
+    await session.connect(roomId, code);
+    await until(() => messages.filter((m) => m.type === 'clock-ping').length >= 8, 5000, 'the clock series');
+    const room = matchMaker.getLocalRoomById(roomId) as unknown as { clocks: Map<string, { active: { toServerTime(t: number): number | null; rttMs: number | null } | null }>; accountBySession: Map<string, string> };
+    const sessionId = [...room.accountBySession].find(([, id]) => id === host.profile.id)?.[0] ?? '';
+    const serverClock = () => room.clocks.get(sessionId)?.active ?? null;
+    const gap = (t: number): number => Math.abs((host.clock.toServer(t) ?? Number.NaN) - (serverClock()?.toServerTime(t) ?? Number.NaN));
+    // Every pong of the series has landed and the server's last offset has come back.
+    await until(() => (serverClock()?.rttMs ?? 0) >= 40 && gap(host.clock.now()) <= 1, 5000, "the device's translation matching the server's");
+    await sleep(CLASS_PING_TAIL_MS);
+    expect(messages.some((m) => m.type === 'clock-offset')).toBe(true);
+    expect(serverClock()?.rttMs ?? 0).toBeGreaterThanOrEqual(40); // the own estimate (no half round trip) would be ≥ 20 ms off
+    for (const t of [host.clock.now(), host.clock.now() + 60_000]) expect(gap(t)).toBeLessThanOrEqual(1);
+    await session.leave();
+  }, 20000);
 });

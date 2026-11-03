@@ -61,7 +61,10 @@ const FIRST_STATE_TIMEOUT_MS = 5000;
 /**
  * - connect(): joinById(roomId, { code }); resolves once the first full state (code ≠ '') has arrived, with every
  *   handler in place (a message is never missed between join and subscription).
- * - Every 'clock-ping' is answered at once with clock.onPing(serverSent) as the 'room' message.
+ * - Every 'clock-ping' is answered at once with clock.onPing(serverSent) as the 'room' message; every 'clock-offset'
+ *   (the server's own measurement, audit K1 r3 #5) is handed to clock.onServerOffset — both before any listener hears
+ *   the message, so what a listener draws from server times already uses the new reading. A 'clock-offset' whose
+ *   offsetMs is not a finite number is dropped.
  * - state: the latest snapshot (state.toJSON()); onState fires after every patch.
  * - Messages reach onMessage listeners as ServerMessage ('round-event' carries the event under `event`);
  *   'class-course' is also remembered as course(); a malformed 'approach-sync' is dropped.
@@ -259,6 +262,8 @@ export class RoomSession {
     if (message.type === 'clock-ping') {
       const pong = this.clock.onPing(message.serverSent);
       this.room?.send('room', pong);
+    } else if (message.type === 'clock-offset') {
+      this.clock.onServerOffset(message.offsetMs);
     } else if (message.type === 'class-course') {
       this.currentCourse = message.course;
     }
@@ -307,6 +312,8 @@ function decode(type: string, payload: unknown): ServerMessage | null {
   switch (type) {
     case 'clock-ping':
       return typeof p.serverSent === 'number' ? { type, serverSent: p.serverSent } : null;
+    case 'clock-offset':
+      return typeof p.offsetMs === 'number' && Number.isFinite(p.offsetMs) ? { type, offsetMs: p.offsetMs } : null;
     case 'class-course':
       return { type, course: p.course as CourseSpec, classNumber: typeof p.classNumber === 'number' ? p.classNumber : 0 };
     case 'class-phase':

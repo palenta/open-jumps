@@ -169,6 +169,13 @@ export type ClassTableWire = Record<string, ClassTableRowWire[]>;
 /** Everything the server sends (message type → payload), as the session hands it on. */
 export type ServerMessage =
   | { type: 'clock-ping'; serverSent: number }
+  /**
+   * To one connection: the server's clock measurement for it, each time a series becomes the active one and each time
+   * a further sample refines it — offsetMs is ClockSync.offsetMs (client − server; the server translates a clientTime c
+   * as c − offsetMs). The client translates with it from then on, so the lit tap zone and the instant hint use the
+   * judge's own translation (audit K1 r3 #5).
+   */
+  | { type: 'clock-offset'; offsetMs: number }
   | { type: 'class-course'; course: CourseSpec; classNumber: number }
   /** A phase began at `startedAt` (server ms); `endsAt` is when its timer ends — walk and results — or null (riding, done). */
   | { type: 'class-phase'; phase: Exclude<RoomPhase, 'lobby'>; heatIndex: number; startedAt: number; endsAt: number | null }
