@@ -1,6 +1,9 @@
-// Plan 1.12: landscape touch layouts. Phone — one right-hand thumb: direction buttons at the two edges, the
-// pace button at least 2×2 cm in the bottom-right corner, the take-off tap in the middle of the right half.
-// Tablet — two thumbs: both direction buttons under the left thumb. Portrait asks to rotate the phone.
+// Plan 1.12 as changed by K1.1 step 1: landscape touch layouts for two thumbs on every device. The phone takes the
+// tablet's family: Left and Right side by side in a left column (≈30 % of the width on a phone, 25 % on a tablet)
+// under the left thumb; the pace square in the bottom-right corner and the take-off zone ("Jump!") in the right
+// half above it and to its left, under the right thumb. On the target phone areas (844×390 — iPhone 16e; 667×375;
+// 667×320 — with the Safari bars) every direction button and the pace square are at least 2×2 cm, Jump! at least
+// 3×3 cm; zones never overlap, lie inside the area, and leave the top 15 % (the HUD) free. Portrait asks to rotate.
 import { describe, expect, it } from 'vitest';
 import { deviceFor, hitTest, LAYOUT, layoutFor, needsRotation, type Control, type Layout, type Rect } from '../src/input/layout.js';
 
@@ -42,16 +45,20 @@ const VIEWPORTS: { name: string; width: number; height: number }[] = [
 ];
 
 describe('LAYOUT', () => {
-  it('2 cm minimum button, 600 px tablet threshold, 18% phone edges, 25% tablet column, the tap zone in the right half', () => {
-    expect(LAYOUT).toEqual({
+  it('2 cm buttons, a 3 cm take-off zone, 600 px tablet threshold, a ≈30 % phone column and a 25 % tablet column, the top 15 % for the HUD', () => {
+    expect(LAYOUT).toMatchObject({
       minButtonPx: 76,
+      minTapPx: 113,
       tabletMinShortSidePx: 600,
-      phoneEdgeFraction: 0.18,
+      phoneColumnFraction: 0.3,
       tabletColumnFraction: 0.25,
-      tapZone: { x: 0.5, y: 0.15, w: 0.32, h: 0.6 },
-      buttonHeightFraction: 0.5,
+      hudTopFraction: 0.15,
       gearMarginPx: 8,
     });
+  });
+
+  it('no edge buttons any more: the K1 phone edge fraction is gone from the contract', () => {
+    expect(LAYOUT).not.toHaveProperty('phoneEdgeFraction');
   });
 });
 
@@ -88,22 +95,25 @@ describe('needsRotation', () => {
   });
 });
 
+/** The target phone areas of K1.1 step 1: an iPhone 16e, a small iPhone, the small iPhone with the Safari bars showing. */
+const PHONE_TARGETS: { name: string; width: number; height: number }[] = [
+  { name: 'iPhone 16e landscape', width: 844, height: 390 },
+  { name: 'iPhone SE landscape', width: 667, height: 375 },
+  { name: 'iPhone SE landscape with the Safari bars showing', width: 667, height: 320 },
+];
+
+/** The tablet areas the layout keeps from K1. */
+const TABLET_TARGETS: { name: string; width: number; height: number }[] = [
+  { name: 'iPad mini landscape', width: 1133, height: 744 },
+  { name: 'iPad landscape', width: 1180, height: 820 },
+];
+
 describe('layoutFor on a phone (844×390)', () => {
   it('reports the device and echoes the viewport', () => {
     const layout = layoutFor(844, 390);
     expect(layout.device).toBe('phone');
     expect(layout.width).toBe(844);
     expect(layout.height).toBe(390);
-  });
-
-  it('turn-left is the left edge, 18% wide, 50% high and vertically centred', () => {
-    expectRect(layoutFor(844, 390).zones['turn-left'], 0, 0.25 * 390, 0.18 * 844, 0.5 * 390);
-  });
-
-  it('turn-right is the right edge, 18% wide, the same height and centring as turn-left', () => {
-    const { zones } = layoutFor(844, 390);
-    expectRect(zones['turn-right'], 844 - 0.18 * 844, 0.25 * 390, 0.18 * 844, 0.5 * 390);
-    expectPx(zones['turn-right'].x + zones['turn-right'].w, 844);
   });
 
   it('the gear is a square of max(2 cm, 20% of the height) = 78 px in the bottom-right corner with an 8 px margin', () => {
@@ -118,40 +128,74 @@ describe('layoutFor on a phone (844×390)', () => {
     expectRect(gear, 667 - 76 - 8, 375 - 76 - 8, 76, 76);
   });
 
-  it('the turn-right button stops above the gear square so that the corner belongs to the gear alone', () => {
-    const { zones } = layoutFor(844, 390);
-    expect(zones['turn-right'].y + zones['turn-right'].h).toBeLessThanOrEqual(zones.gear.y);
+  it('on a short viewport (667×320, the Safari bars showing) the pace square keeps its 2 cm in the corner', () => {
+    expectRect(layoutFor(667, 320).zones.gear, 667 - 76 - 8, 320 - 76 - 8, 76, 76);
   });
 
-  it('on a short viewport (667×320, the Safari bars showing) the pace square keeps its 2 cm and both direction buttons end at its top', () => {
-    const { zones } = layoutFor(667, 320);
-    expectRect(zones.gear, 667 - 76 - 8, 320 - 76 - 8, 76, 76); // y = 236, above 75% of the height (240)
-    for (const control of ['turn-left', 'turn-right'] as const) {
-      expectPx(zones[control].y, 0.25 * 320);
-      expectPx(zones[control].y + zones[control].h, zones.gear.y);
-    }
-  });
-
-  it('the buttons end at the lower of 75% of the height and the pace square top: 335 px takes the square (251), 336 px either (252), 340 px the 75% (255)', () => {
-    const bottom = (height: number) => {
-      const { zones } = layoutFor(667, height);
-      return zones['turn-right'].y + zones['turn-right'].h;
-    };
-    expectPx(bottom(335), 335 - 76 - 8);
-    expectPx(bottom(336), 0.75 * 336);
-    expectPx(bottom(340), 0.75 * 340);
-    expect(bottom(335)).toBeLessThanOrEqual(layoutFor(667, 335).zones.gear.y);
-  });
-
-  it('the tap zone is the central part of the right half: x 50%, y 15%, w 32%, h 60%', () => {
-    expectRect(layoutFor(844, 390).zones.tap, 0.5 * 844, 0.15 * 390, 0.32 * 844, 0.6 * 390);
-  });
-
-  it('an explicit device overrides the detection: the tablet layout on a phone viewport puts both direction buttons on the left', () => {
+  it('an explicit device overrides the detection: the tablet layout on a phone viewport is the 25 % column', () => {
     const { device, zones } = layoutFor(844, 390, 'tablet');
     expect(device).toBe('tablet');
     expectPx(zones['turn-left'].x, 0);
     expectPx(zones['turn-right'].x, zones['turn-left'].w);
+    expectPx(zones['turn-right'].x + zones['turn-right'].w, 0.25 * 844);
+  });
+});
+
+describe('layoutFor on the target phone areas: two thumbs (K1.1 step 1)', () => {
+  it.each(PHONE_TARGETS)('Left and Right side by side in the left column, Left at the edge and Right right next to it ($name $width×$height)', ({ width, height }) => {
+    const { zones } = layoutFor(width, height);
+    const left = zones['turn-left'];
+    const right = zones['turn-right'];
+    expectPx(left.x, 0);
+    expectPx(right.x, left.x + left.w);
+    expect(left.x + left.w / 2).toBeLessThan(right.x + right.w / 2);
+    expect(right.y).toBe(left.y);
+    expect(right.h).toBe(left.h);
+  });
+
+  it.each(PHONE_TARGETS)('the column is ≈30 % of the width: Right ends at LAYOUT.phoneColumnFraction of it ($name $width×$height)', ({ width, height }) => {
+    const right = layoutFor(width, height).zones['turn-right'];
+    expectPx(right.x + right.w, LAYOUT.phoneColumnFraction * width);
+  });
+
+  it.each(PHONE_TARGETS)('nothing of the two direction buttons is right of the column: the right edge of the area is not a button any more ($name $width×$height)', ({ width, height }) => {
+    const layout = layoutFor(width, height);
+    const right = layout.zones['turn-right'];
+    const [, y] = centre(right);
+    expect(hitTest(layout, width - 1, y)).not.toBe('turn-right');
+    expect(hitTest(layout, width - 1, y)).not.toBe('turn-left');
+  });
+
+  it.each(PHONE_TARGETS)('each direction button is at least 2×2 cm ($name $width×$height)', ({ width, height }) => {
+    const { zones } = layoutFor(width, height);
+    for (const control of ['turn-left', 'turn-right'] as const) {
+      expect(zones[control].w, `${control} width`).toBeGreaterThanOrEqual(LAYOUT.minButtonPx);
+      expect(zones[control].h, `${control} height`).toBeGreaterThanOrEqual(LAYOUT.minButtonPx);
+    }
+  });
+
+  it.each(PHONE_TARGETS)('the pace square is at least 2×2 cm in the bottom-right corner ($name $width×$height)', ({ width, height }) => {
+    const { gear } = layoutFor(width, height).zones;
+    expect(gear.w).toBeGreaterThanOrEqual(LAYOUT.minButtonPx);
+    expect(gear.h).toBeGreaterThanOrEqual(LAYOUT.minButtonPx);
+    expectPx(gear.x + gear.w, width - LAYOUT.gearMarginPx);
+    expectPx(gear.y + gear.h, height - LAYOUT.gearMarginPx);
+  });
+
+  it.each(PHONE_TARGETS)('Jump! is at least 3×3 cm, in the right half, above the pace square and to its left ($name $width×$height)', ({ width, height }) => {
+    const { tap, gear } = layoutFor(width, height).zones;
+    expect(tap.w).toBeGreaterThanOrEqual(LAYOUT.minTapPx);
+    expect(tap.h).toBeGreaterThanOrEqual(LAYOUT.minTapPx);
+    expect(tap.x).toBeGreaterThanOrEqual(width / 2 - 1);
+    expect(tap.x).toBeLessThan(gear.x);
+    expect(tap.y).toBeLessThan(gear.y);
+  });
+
+  it('negative: a viewport too small for the targets (480×300) still keeps every zone inside and apart, the pace square still 2 cm', () => {
+    const { zones } = layoutFor(480, 300);
+    for (const control of CONTROLS) expect(inside(zones[control], 480, 300), control).toBe(true);
+    expect(zones.gear.w).toBeGreaterThanOrEqual(LAYOUT.minButtonPx);
+    expect(overlaps(zones['turn-left'], zones['turn-right'])).toBe(false);
   });
 });
 
@@ -180,6 +224,17 @@ describe('layoutFor on a tablet (1133×744)', () => {
     expectRect(gear, 1133 - side - 8, 744 - side - 8, side, side);
     expect(gear.w).toBe(gear.h);
   });
+
+  it('the tablet buttons end at the lower of 75% of the height and the pace square top: 335 px takes the square (251), 336 px either (252), 340 px the 75% (255)', () => {
+    const bottom = (height: number) => {
+      const { zones } = layoutFor(667, height, 'tablet');
+      return zones['turn-right'].y + zones['turn-right'].h;
+    };
+    expectPx(bottom(335), 335 - 76 - 8);
+    expectPx(bottom(336), 0.75 * 336);
+    expectPx(bottom(340), 0.75 * 340);
+    expect(bottom(335)).toBeLessThanOrEqual(layoutFor(667, 335, 'tablet').zones.gear.y);
+  });
 });
 
 describe('layoutFor invariants', () => {
@@ -206,6 +261,24 @@ describe('layoutFor invariants', () => {
     const { gear } = layoutFor(width, height).zones;
     expect(gear.w).toBeGreaterThanOrEqual(LAYOUT.minButtonPx);
     expect(gear.h).toBeGreaterThanOrEqual(LAYOUT.minButtonPx);
+  });
+
+  it.each(VIEWPORTS)('the top 15 % of the height is the HUD\'s: no zone starts above it ($name $width×$height)', ({ width, height }) => {
+    const { zones } = layoutFor(width, height);
+    for (const control of CONTROLS) {
+      expect(zones[control].y, `${control} on ${width}×${height}`).toBeGreaterThanOrEqual(LAYOUT.hudTopFraction * height - 0.5);
+    }
+  });
+
+  it.each([...PHONE_TARGETS, ...TABLET_TARGETS])('the shared invariants of both families: Left left of Right in one column at the left edge, every button 2×2 cm, Jump! 3×3 cm in the right half ($name $width×$height)', ({ width, height }) => {
+    const { zones } = layoutFor(width, height);
+    expectPx(zones['turn-left'].x, 0);
+    expectPx(zones['turn-right'].x, zones['turn-left'].x + zones['turn-left'].w);
+    for (const control of ['turn-left', 'turn-right', 'gear'] as const) {
+      expect(Math.min(zones[control].w, zones[control].h), control).toBeGreaterThanOrEqual(LAYOUT.minButtonPx);
+    }
+    expect(Math.min(zones.tap.w, zones.tap.h)).toBeGreaterThanOrEqual(LAYOUT.minTapPx);
+    expect(zones.tap.x).toBeGreaterThanOrEqual(width / 2 - 1);
   });
 });
 

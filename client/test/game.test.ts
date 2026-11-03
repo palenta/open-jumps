@@ -18,6 +18,7 @@ import {
   type SessionLike,
   type WindowLike,
 } from '../src/app/game.js';
+import { hitTest, layoutFor, type Control, type Layout } from '../src/input/layout.js';
 import type { ApiResult, CreateRoomReply } from '../src/net/api.js';
 import { ClientClock } from '../src/net/clientClock.js';
 import type { SessionEnd, SessionStatus } from '../src/net/roomSession.js';
@@ -497,11 +498,17 @@ const phaseMessage = (phase: 'walk' | 'riding' | 'results' | 'done', heatIndex: 
   endsAt,
 });
 
-/** Points (CSS px) inside the phone layout zones for 844×390: tap x 422..692 y 58..292; gear x 758..836 y 304..382; turn-left x 0..152 y 97..292; turn-right x 692..844 y 97..292. */
-const TAP: [number, number] = [500, 150];
-const GEAR: [number, number] = [800, 345];
-const TURN_LEFT: [number, number] = [10, 195];
-const TURN_RIGHT: [number, number] = [830, 195];
+/** The phone layout of the harness's arena (an iPhone 16e in landscape, 844×390). */
+const PHONE_LAYOUT = layoutFor(844, 390);
+/** The middle of a control's zone in that layout (the points follow the layout, whichever geometry it has). */
+const middleOf = (control: Control): [number, number] => {
+  const zone = PHONE_LAYOUT.zones[control];
+  return [zone.x + zone.w / 2, zone.y + zone.h / 2];
+};
+const TAP: [number, number] = middleOf('tap');
+const GEAR: [number, number] = middleOf('gear');
+const TURN_LEFT: [number, number] = middleOf('turn-left');
+const TURN_RIGHT: [number, number] = middleOf('turn-right');
 
 // ---- the harness -------------------------------------------------------------------------------------------
 
@@ -605,6 +612,20 @@ function q<T extends Element = HTMLElement>(root: ParentNode, selector: string):
 }
 
 const text = (element: Element | null): string => (element?.textContent ?? '').replace(/\s+/g, ' ').trim();
+
+/** Every control is drawn exactly at its zone of `layout` (arena-local CSS px). */
+function expectPlaced(h: Harness, layout: Layout): void {
+  for (const control of ['turn-left', 'turn-right', 'gear', 'tap'] as const) {
+    const element = q(h.root, `[data-control="${control}"]`);
+    const zone = layout.zones[control];
+    expect([element.style.left, element.style.top, element.style.width, element.style.height], control).toEqual([
+      `${String(zone.x)}px`,
+      `${String(zone.y)}px`,
+      `${String(zone.w)}px`,
+      `${String(zone.h)}px`,
+    ]);
+  }
+}
 
 function click(root: ParentNode, selector: string): void {
   q(root, selector).click();
@@ -1368,16 +1389,14 @@ describe('the round screen', () => {
     expect(frame?.camera).not.toBeNull();
   });
 
-  it('the four controls are placed by the phone layout of 844×390', async () => {
+  it('the four controls are placed by the phone layout of 844×390: each one exactly at its zone of layoutFor', async () => {
     const h = await inRound();
+    expectPlaced(h, layoutFor(844, 390));
     const gear = q(h.root, '[data-control="gear"]');
     expect(gear.style.left).toBe(`${String(844 - 78 - 8)}px`);
     expect(gear.style.top).toBe(`${String(390 - 78 - 8)}px`);
     expect(gear.style.width).toBe('78px');
     expect(gear.style.height).toBe('78px');
-    expect(q(h.root, '[data-control="turn-left"]').style.left).toBe('0px');
-    expect(q(h.root, '[data-control="tap"]').style.left).toBe('422px');
-    expect(h.root.querySelector('[data-control="turn-right"]')).not.toBeNull();
   });
 
   it('the rotate overlay is hidden in landscape, shown after a resize to portrait, hidden again after turning back', async () => {
@@ -1409,23 +1428,22 @@ describe('the round screen', () => {
     const h = await inRound();
     Object.assign(h.arena, { left: 44, top: 0, width: 756, height: 369 });
     h.game.resize();
+    expectPlaced(h, layoutFor(756, 369));
     const gear = q(h.root, '[data-control="gear"]');
     expect(gear.style.left).toBe(`${String(756 - 76 - 8)}px`); // 672: inside the 756 px wide arena, not 844 − …
     expect(gear.style.top).toBe(`${String(369 - 76 - 8)}px`); // 285
     expect(gear.style.width).toBe('76px');
     expect(q(h.root, '[data-control="turn-left"]').style.left).toBe('0px');
-    expect(q(h.root, '[data-control="tap"]').style.left).toBe(`${String(0.5 * 756)}px`);
   });
 
-  it('when the browser bars appear (the arena shrinks to 756×320) resize() keeps the 2 cm pace square and moves it up', async () => {
+  it('when the browser bars appear (the arena shrinks to 756×320) resize() keeps the 2 cm pace square and moves it up; no control overlaps it', async () => {
     const h = await inRound();
     Object.assign(h.arena, { left: 44, top: 0, width: 756, height: 320 });
     h.game.resize();
+    expectPlaced(h, layoutFor(756, 320));
     const gear = q(h.root, '[data-control="gear"]');
     expect(gear.style.top).toBe(`${String(320 - 76 - 8)}px`); // 236
     expect(gear.style.height).toBe('76px');
-    const turnRight = q(h.root, '[data-control="turn-right"]');
-    expect(Number.parseFloat(turnRight.style.top) + Number.parseFloat(turnRight.style.height)).toBeLessThanOrEqual(236);
   });
 });
 
@@ -1522,14 +1540,26 @@ describe('pointer presses on the arena', () => {
 
   it('a finger is translated by the arena origin on both axes: points that hit the displayed gear only after the translation send the gear, points that would hit it only untranslated send nothing', async () => {
     const h = await inRound();
-    Object.assign(h.arena, { left: 44, top: 30, width: 756, height: 369 });
+    const origin = { left: 44, top: 30 };
+    Object.assign(h.arena, { ...origin, width: 756, height: 369 });
     h.game.resize();
-    // The displayed pace square: arena-local x 672..748, y 285..361 → client x 716..792, y 315..391.
-    press(h, [690, 340]); // local (646, 310): left of the square — untranslated (690, 340) would be inside it
-    press(h, [720, 310]); // local (676, 280): just above the square (and below the right button) — untranslated (720, 310) would be inside it
+    const layout = layoutFor(756, 369);
+    const gear = layout.zones.gear; // arena-local; the pace square keeps its corner whatever else the layout does
+    const client = ([x, y]: [number, number]): [number, number] => [x + origin.left, y + origin.top];
+    // Client points inside the displayed square only untranslated: their arena-local point (30 px up, 44 px left)
+    // is in no zone — found in the layout itself, so the check holds for any geometry of the other controls.
+    const strays: [number, number][] = [];
+    for (let y = gear.y + 1; y < gear.y + gear.h && strays.length < 2; y += 3) {
+      for (let x = gear.x + 1; x < gear.x + gear.w && strays.length < 2; x += 3) {
+        if (hitTest(layout, x - origin.left, y - origin.top) === null) strays.push([x, y]);
+      }
+    }
+    expect(strays.length, 'client points inside the untranslated square whose local point is in no zone').toBe(2);
+    for (const point of strays) press(h, point);
     expect(h.session().sent).toEqual([]);
-    press(h, [770, 340]); // local (726, 310): inside — untranslated x 770 would be right of the square
-    press(h, [760, 370]); // local (716, 340): inside — untranslated y 370 would be below the square
+    // Local points inside the square near its right and bottom edges: untranslated they would be right of / below it.
+    press(h, client([gear.x + gear.w - 4, gear.y + gear.h / 2]));
+    press(h, client([gear.x + gear.w / 2, gear.y + gear.h - 4]));
     expect(h.session().sentOf('gear')).toEqual([
       { type: 'gear', gear: 'extended' },
       { type: 'gear', gear: 'gallop' },
@@ -1538,10 +1568,10 @@ describe('pointer presses on the arena', () => {
     press(h, [10, 195]);
     press(h, [500, 20]);
     expect(h.session().sent).toHaveLength(2);
-    // The tap zone: arena-local x 378..620, y 55..277 → client x 422..664, y 85..307; (650, 90) is local (606, 60),
-    // inside — untranslated x 650 would be right of the zone.
+    // The tap zone near its top-right corner, translated: untranslated it would be right of the zone.
+    const tap = layout.zones.tap;
     approachOwn(h);
-    press(h, [650, 90]);
+    press(h, client([tap.x + tap.w - 14, tap.y + 5]));
     expect(h.session().sentOf('tap')).toEqual([{ type: 'tap', clientTime: h.clock.now(), fence: 1, attempt: 1 }]);
   });
 
