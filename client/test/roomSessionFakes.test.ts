@@ -243,3 +243,37 @@ describe("the 'approach-sync' message (audit K1 r2 #1)", () => {
     ]);
   });
 });
+
+describe('RoomSession.send tells whether the message went out (audit K1 r3 #1)', () => {
+  const tap = { type: 'tap', clientTime: 6000, fence: 1, attempt: 1 } as const;
+
+  it('connected: handed to the room, true; dropped (the SDK retrying): nothing handed to the room, false; recovered: true again', async () => {
+    const { room, session } = await connected(true);
+    expect(session.send(tap)).toBe(true);
+    room.drop(1006);
+    expect(session.status).toBe('dropped');
+    expect(session.send(tap)).toBe(false);
+    room.reconnected('t2');
+    expect(session.status).toBe('connected');
+    expect(session.send(tap)).toBe(true);
+    expect(room.sent).toEqual([
+      { type: 'room', payload: tap },
+      { type: 'room', payload: tap },
+    ]);
+  });
+
+  it('connecting (resume() under way) and ended: false, nothing handed to any room', async () => {
+    const { sdk, room, session } = await connected(false);
+    room.drop(1006);
+    const next = new FakeRoom('t2');
+    sdk.nextReconnect = next;
+    const resumed = session.resume();
+    expect(session.status).toBe('connecting');
+    expect(session.send(tap)).toBe(false);
+    expect(await resumed).toBe(true);
+    await session.leave();
+    expect(session.status).toBe('ended');
+    expect(session.send(tap)).toBe(false);
+    expect([...room.sent, ...next.sent].filter((m) => (m as { type: string }).type === 'room')).toEqual([]);
+  });
+});

@@ -42,7 +42,7 @@ class Player {
     this.controller = new InputController({
       send: (m) => {
         this.sent.push(m);
-        this.session.send(m);
+        return this.session.send(m);
       },
     });
     this.hint = new InstantHint(device.clock, { heightClass: 70, rules: { mode: 'ranked', assists: { schoolmaster: false, widerWindow: false } } });

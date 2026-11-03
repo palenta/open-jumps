@@ -186,7 +186,9 @@ interface RoundModules {
  *   and spends nothing (audit K1 r1 #1). A rider who takes control
  *   back — the SDK recovered, resume(), or a fresh join through Reconnect — missed the broadcasts of the time away:
  *   the server's 'approach-sync' (the approach open now, or none) arms or disarms the tap, the lit zone and the hint
- *   the same way, and an attempt whose tap already went out is never armed twice (audit K1 r2 #1).
+ *   the same way, and an attempt whose tap already went out is never armed twice (audit K1 r2 #1). Only what went
+ *   out is spent: a press while the session cannot send (dropped, connecting — session.send answers false) sends
+ *   nothing, shows no hint and spends nothing, so the first tap after the SDK recovered goes out (audit K1 r3 #1).
  *   The round-side modules (InstantHint, InputController, RemoteInterpolator, RoundClockEstimate) are created
  *   anew at every class-course message, so a new class starts clean (a new round key, an empty buffer: the other
  *   horses are drawn from the new class's samples only, never from the last class's positions).
@@ -279,12 +281,14 @@ export function createGame(deps: GameDeps): Game {
     return captionOf(locale, round.caption.event, { rider: captionNames.riderName, pony: captionNames.ponyName, ponyGender: captionNames.ponyGender });
   }
 
-  function send(message: ClientRoomMessage): void {
-    session?.send(message);
-    if (message.type === 'line' && round) {
+  /** Hands a message to the session; true when it went out (a line the server never heard changes nothing here). */
+  function send(message: ClientRoomMessage): boolean {
+    const went = session?.send(message) ?? false;
+    if (went && message.type === 'line' && round) {
       round.requestedLine = message.line;
       round.hint.setLine(message.line);
     }
+    return went;
   }
 
   function escapeHtml(value: string): string {

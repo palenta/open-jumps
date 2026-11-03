@@ -32,8 +32,13 @@ const noWindow = { addEventListener: () => undefined, removeEventListener: () =>
 export interface AppUnderTest {
   game: Game;
   root: HTMLElement;
-  /** Every message every session of the app sent, in order. */
+  /**
+   * Every message a session of the app actually handed to the SDK room, in order: the session reports what went out
+   * (it sends nothing while dropped or connecting), so a press the session swallowed is not here.
+   */
   sent: ClientRoomMessage[];
+  /** Every message the app asked a session to send, in order — also those the session could not send. */
+  attempted: ClientRoomMessage[];
   /** Every message every session of the app received, in order. */
   received: ServerMessage[];
   /** The roomId the app connected to (from its first connect). */
@@ -50,6 +55,7 @@ export async function appFor(device: Device, options: AppOptions = {}): Promise<
   const root = dom.document.createElement('div') as unknown as HTMLElement;
   dom.document.body.appendChild(root as unknown as Parameters<typeof dom.document.body.appendChild>[0]);
   const sent: ClientRoomMessage[] = [];
+  const attempted: ClientRoomMessage[] = [];
   const received: ServerMessage[] = [];
   let roomId = '';
   const game = createGame({
@@ -61,8 +67,10 @@ export async function appFor(device: Device, options: AppOptions = {}): Promise<
       const session = new RoomSession({ sdk: device.sdk(), clock: device.clock, autoReconnect: true, ...(options.retry ? { retry: options.retry } : {}) });
       const send = session.send.bind(session);
       session.send = (message) => {
-        sent.push(message);
-        send(message);
+        attempted.push(message);
+        const went = send(message);
+        if (went) sent.push(message);
+        return went;
       };
       const connect = session.connect.bind(session);
       session.connect = (id, code) => {
@@ -78,7 +86,7 @@ export async function appFor(device: Device, options: AppOptions = {}): Promise<
     measure: () => ({ ...ARENA }),
   });
   await until(() => root.dataset.screen === 'home', 5000, 'the home screen');
-  return { game, root, sent, received, roomId: () => roomId };
+  return { game, root, sent, attempted, received, roomId: () => roomId };
 }
 
 export function click(root: HTMLElement, selector: string): void {

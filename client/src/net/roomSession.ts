@@ -75,7 +75,9 @@ const FIRST_STATE_TIMEOUT_MS = 5000;
  *   'lost') or when the SDK is still retrying (its outcome comes as the next status).
  * - reconnectionToken: always the room's current one — the SDK renews it on every reconnection, right after its
  *   onReconnect callback, so the stored copy is refreshed a microtask later too (audit K1 r1 #10).
- * - send() while dropped is dropped silently (a rider command is useless late; the server has autopilot).
+ * - send() while not connected (dropped, connecting) sends nothing and returns false — a rider command is useless
+ *   late and the server has autopilot — so the caller can keep the input unspent (audit K1 r3 #1); true when the
+ *   message was handed to the room.
  */
 export class RoomSession {
   private readonly sdk: SdkLike;
@@ -148,9 +150,14 @@ export class RoomSession {
     }
   }
 
-  send(message: ClientRoomMessage): void {
-    if (this.currentStatus !== 'connected' || this.room === null) return;
+  /**
+   * Hands the message to the room and returns true; while not connected (dropped, connecting, ended, idle) nothing is
+   * sent and the answer is false, so the caller knows the input never left (audit K1 r3 #1).
+   */
+  send(message: ClientRoomMessage): boolean {
+    if (this.currentStatus !== 'connected' || this.room === null) return false;
     this.room.send('room', message);
+    return true;
   }
 
   get state(): LobbyStateSnapshot | null {

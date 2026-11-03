@@ -11,7 +11,12 @@ import type { ClientRoomMessage } from '../src/net/types.js';
 /** A controller whose sent messages are collected. */
 function controller(): { input: InputController; sent: ClientRoomMessage[] } {
   const sent: ClientRoomMessage[] = [];
-  const input = new InputController({ send: (message) => sent.push(message) });
+  const input = new InputController({
+    send: (message) => {
+      sent.push(message);
+      return true;
+    },
+  });
   return { input, sent };
 }
 
@@ -344,5 +349,61 @@ describe('InputController sync from the server (audit K1 r2 #1)', () => {
     input.sync('0#3', null);
     expect(input.press('tap', 6010)).toMatchObject({ type: 'tap', fence: 1, attempt: 1 });
     expect(sent).toHaveLength(1);
+  });
+});
+
+describe('InputController when the session cannot send (audit K1 r3 #1)', () => {
+  /** A controller whose session answers `online()`: a message counts as sent only while it is true. */
+  function flaky(): { input: InputController; sent: ClientRoomMessage[]; setOnline: (on: boolean) => void } {
+    let online = true;
+    const sent: ClientRoomMessage[] = [];
+    const input = new InputController({
+      send: (message) => {
+        if (!online) return false;
+        sent.push(message);
+        return true;
+      },
+    });
+    input.update(riding(1, 1));
+    return { input, sent, setOnline: (on) => (online = on) };
+  }
+
+  it('a tap the session could not send is null and spends nothing: the same approach (also re-armed by a sync) sends the next tap', () => {
+    const { input, sent, setOnline } = flaky();
+    input.approach({ fence: 1, attempt: 1 });
+    setOnline(false);
+    expect(input.press('tap', 5000)).toBeNull();
+    expect(input.armed).toBe(true);
+    setOnline(true);
+    input.sync('1#0', { fence: 1, attempt: 1 });
+    expect(input.press('tap', 6100)).toEqual({ type: 'tap', clientTime: 6100, fence: 1, attempt: 1 });
+    expect(sent).toEqual([{ type: 'tap', clientTime: 6100, fence: 1, attempt: 1 }]);
+  });
+
+  it('a tap that really went out still blocks a second one, also after a sync of the same attempt', () => {
+    const { input, sent } = flaky();
+    input.approach({ fence: 1, attempt: 1 });
+    expect(input.press('tap', 6000)).not.toBeNull();
+    input.sync('1#0', { fence: 1, attempt: 1 });
+    expect(input.press('tap', 6050)).toBeNull();
+    expect(sent).toHaveLength(1);
+  });
+
+  it('a gear, line or turn press the session could not send changes nothing: the gear, the line and the turn window stay', () => {
+    const { input, sent, setOnline } = flaky();
+    setOnline(false);
+    expect(input.press('gear', 5000)).toBeNull();
+    expect(input.requestedGear).toBe('collected');
+    expect(input.press('turn-left', 5000)).toBeNull();
+    expect(input.requestedLine).toBe('center');
+    input.turnAhead(5000);
+    expect(input.press('turn-right', 5100)).toBeNull();
+    setOnline(true);
+    expect(input.press('turn-right', 5200)).toEqual({ type: 'turn', choice: 'right', clientTime: 5200 });
+    expect(input.press('gear', 5300)).toEqual({ type: 'gear', gear: 'extended' });
+    expect(sent).toEqual([
+      { type: 'turn', choice: 'right', clientTime: 5200 },
+      { type: 'gear', gear: 'extended' },
+    ]);
   });
 });

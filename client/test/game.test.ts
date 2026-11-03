@@ -196,8 +196,11 @@ class FakeSession implements SessionLike {
     return Promise.resolve();
   }
 
-  send(message: ClientRoomMessage): void {
+  /** As the real session: handed out (recorded) only while connected; false otherwise, nothing recorded. */
+  send(message: ClientRoomMessage): boolean {
+    if (this.status !== 'connected') return false;
     this.sent.push(message);
+    return true;
   }
 
   course(): CourseSpec | null {
@@ -1875,6 +1878,26 @@ describe('taking control back (audit K1 r2 #1)', () => {
     h.clock.t += 50;
     press(h, TAP);
     expect(h.session().sentOf('tap')).toHaveLength(1);
+  });
+
+  it('a press while the session is dropped spends nothing and shows no hint: back before t0, the approach-sync of the same approach arms the tap and her press goes out (audit K1 r3 #1)', async () => {
+    const h = await inApproach();
+    const caption = text(h.root.querySelector('[data-hud-caption]'));
+    h.session().emitStatus('dropped');
+    h.clock.t += 300;
+    press(h, TAP);
+    expect(h.session().sentOf('tap')).toEqual([]);
+    expect(text(h.root.querySelector('[data-hud-caption]'))).toBe(caption); // no instant hint for a tap that never left
+    h.clock.t += 400;
+    h.session().emitStatus('connected');
+    const t0 = h.clock.now() + 1_000;
+    h.session().emitMessage(approachSync({ fence: 1, attempt: 1, t0 }));
+    h.game.frame(h.clock.now());
+    expect(tapControl(h).getAttribute('data-armed')).toBe('true');
+    h.clock.t = t0 + 20;
+    press(h, TAP);
+    expect(h.session().sentOf('tap')).toEqual([{ type: 'tap', clientTime: t0 + 20, fence: 1, attempt: 1 }]);
+    expect(text(h.root.querySelector('[data-hud-caption]'))).not.toBe(caption);
   });
 
   it('an approach-sync of another class or another heat than the one on screen changes nothing', async () => {

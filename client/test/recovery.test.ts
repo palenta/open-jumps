@@ -32,6 +32,12 @@ const UNRETRIED_DROP_CODE = 4005;
 /** A drop the SDK retries by itself (GOING_AWAY). */
 const RETRIABLE_DROP_CODE = 1001;
 
+/**
+ * The SDK's retries as in production (on), the first retry 400 ms after the drop: dropped right after her approach
+ * opened (18 m, 3.6 s into the heat), the rider is back at ~4.1 s, well before its t0 (30 m, 6.0 s).
+ */
+const QUICK_RETRY: RetrySettings = { minUptime: 0, maxRetries: 3, delay: 400, minDelay: 400, maxDelay: 400 };
+
 const roundEvents = <T extends RoundEventWire['type']>(messages: ServerMessage[], type: T, riderId: string) =>
   messages
     .filter((m): m is Extract<ServerMessage, { type: 'round-event' }> => m.type === 'round-event')
@@ -42,10 +48,10 @@ const roundEvents = <T extends RoundEventWire['type']>(messages: ServerMessage[]
  * Maria hosts in the app; her friend Ana (a plain session that also rides, passively) is the witness: the server's
  * broadcasts reach Ana while Maria is away, so the test learns Maria's t0 from Ana's copy of the 'approach' event.
  */
-async function classWithWitness(): Promise<{ maria: Device; app: AppUnderTest; witness: ServerMessage[]; ana: RoomSession }> {
+async function classWithWitness(retry: RetrySettings = RETRY): Promise<{ maria: Device; app: AppUnderTest; witness: ServerMessage[]; ana: RoomSession }> {
   const maria = await newDevice(live, 'Maria');
   const anaDevice = await newDevice(live, 'Ana');
-  const app = await appFor(maria, { retry: RETRY });
+  const app = await appFor(maria, { retry });
   click(app.root, '[data-action="create-room"]');
   await until(() => (app.game.session?.state?.code ?? '') !== '' && app.root.dataset.screen === 'lobby', 5000, "Maria's lobby");
   const code = app.game.session?.state?.code ?? '';
@@ -124,6 +130,46 @@ describe('the first controlled jump after a return (audit K1 r2 #1)', () => {
     click(app.root, '[data-action="reconnect"]');
     await until(() => app.game.session !== first && app.game.session?.status === 'connected' && app.root.dataset.screen === 'round', 5000, 'a fresh session on the round screen');
     await firstJumpAfterReturn(maria, app, approach);
+    app.game.destroy();
+    await ana.leave();
+  }, 40000);
+
+  it('a press during the drop spends nothing: the SDK recovers before t0, and her first tap that really goes out is the take-off the server judges (audit K1 r3 #1)', async () => {
+    const { maria, app, ana } = await classWithWitness(QUICK_RETRY);
+    const id = maria.profile.id;
+    const roomId = app.roomId();
+    // The approach reaches her while she is connected: the zone is lit for it.
+    await until(() => roundEvents(app.received, 'approach', id).length > 0, 8000, 'her approach');
+    const approach = roundEvents(app.received, 'approach', id)[0];
+    if (!approach) throw new Error('no approach');
+    await until(() => app.root.querySelector('[data-control="tap"]')?.getAttribute('data-armed') === 'true', 1500, 'the tap zone lit');
+    dropFromServer(roomId, id, RETRIABLE_DROP_CODE);
+    await until(() => app.game.session?.status === 'dropped', 2000, 'the drop');
+    // A finger on the lit zone while the session cannot send: nothing goes out, and nothing is spent.
+    tapZone(app);
+    expect(app.attempted.filter((m) => m.type === 'tap')).toHaveLength(1);
+    expect(app.sent.filter((m) => m.type === 'tap')).toEqual([]);
+    await until(() => app.game.session?.status === 'connected', 5000, 'the SDK reconnecting by itself');
+    await until(() => app.received.some((m) => m.type === 'approach-sync'), 2000, 'the approach-sync of the return');
+    expect(app.received.filter((m) => m.type === 'approach-sync').at(-1)).toMatchObject({ approach: { fence: approach.fence, attempt: approach.attempt, t0: approach.t0 } });
+    const takeoffAt = maria.clock.toClient(approach.t0);
+    if (takeoffAt === null) throw new Error('the clock is not ready');
+    expect(takeoffAt - maria.clock.now()).toBeGreaterThan(300); // back well before the take-off moment
+    expect(app.root.querySelector('[data-control="tap"]')?.getAttribute('data-armed')).toBe('true');
+    await sleep(Math.max(0, takeoffAt + 100 - maria.clock.now()));
+    tapZone(app);
+    // The first tap that really went out is this one, for the approach in progress.
+    const taps = app.sent.filter((m) => m.type === 'tap');
+    expect(taps).toEqual([{ type: 'tap', clientTime: expect.any(Number), fence: approach.fence, attempt: approach.attempt }]);
+    expect(taps[0]?.clientTime ?? 0).toBeGreaterThan(takeoffAt);
+    // The server judged HER tap (an offset), not a missing tap at the deadline and not the autopilot.
+    await until(() => roundEvents(app.received, 'takeoff', id).length > 0, 3000, "the server's verdict");
+    const takeoff = roundEvents(app.received, 'takeoff', id)[0];
+    expect(takeoff).toMatchObject({ fence: approach.fence, attempt: approach.attempt });
+    expect(takeoff?.offsetMs).not.toBeNull();
+    expect(takeoff?.offsetMs ?? 0).toBeGreaterThan(40);
+    expect(takeoff?.offsetMs ?? 0).toBeLessThan(250);
+    expect(['clean', 'perfect', 'chip']).toContain(takeoff?.outcome.kind);
     app.game.destroy();
     await ana.leave();
   }, 40000);

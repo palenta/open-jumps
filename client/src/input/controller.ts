@@ -32,7 +32,8 @@ export interface OpenApproach {
 }
 
 export interface InputControllerDeps {
-  send: (message: ClientRoomMessage) => void;
+  /** Hands a message to the room session: true when it went out, false when the session could not send it (dropped, connecting). */
+  send: (message: ClientRoomMessage) => boolean;
 }
 
 /**
@@ -47,15 +48,21 @@ export interface InputControllerDeps {
  *   than the state's is ignored. Never armed from the state's nextFence.
  * - One tap per attempt: the fence and attempt of the last tap that went out are remembered for the round, and
  *   neither a repeated approach event nor a sync arms that attempt again.
+ * - Only what went out is spent (audit K1 r3 #1): a press is turned into its message first, the message is handed to
+ *   deps.send, and only when send answers true does the press take effect — the tap of the approach marked as gone
+ *   (and remembered as the last tap), the turn window closed, the gear or line switched. A press while the session
+ *   cannot send (dropped, connecting) changes nothing, so the tap of an approach still open after the SDK recovered
+ *   goes out on the next press — and a second press after a tap that really went out still sends nothing.
  * - press(control, clientTime): the message sent, or null when nothing was (not riding; a tap with no approach open
- *   or a second tap in the same approach; an unknown control). clientTime is the ClientClock reading at pointer-down.
+ *   or a second tap in the same approach; an unknown control; the session could not send). clientTime is the
+ *   ClientClock reading of the pointer-down (the game passes the event's own time, see game.ts).
  * - turnAhead() opens the turn window for turnWindowMs (or until turnTaken()); a 'turn-left'/'turn-right' press
  *   inside it sends {type:'turn', choice, clientTime} and closes the window; outside it sends a line toggle
  *   {type:'line', line} (center ↔ angle); the gear press sends the next gear of INPUT.gearOrder (cyclic),
  *   starting from 'collected'.
  */
 export class InputController {
-  private readonly send: (message: ClientRoomMessage) => void;
+  private readonly send: (message: ClientRoomMessage) => boolean;
   private state: RiderInputState | null = null;
   /** The open approach of the own horse and whether its one tap went out; null between approaches. */
   private open: (OpenApproach & { tapped: boolean }) | null = null;
@@ -112,41 +119,52 @@ export class InputController {
   press(control: Control, clientTime: number): ClientRoomMessage | null {
     const state = this.state;
     if (state === null || !state.riding) return null;
+    const message = this.messageFor(control, clientTime);
+    if (message === null) return null;
+    // Nothing is spent unless the message really went out (audit K1 r3 #1).
+    if (!this.send(message)) return null;
+    switch (message.type) {
+      case 'tap':
+        if (this.open !== null) this.open.tapped = true;
+        this.lastTap = { fence: message.fence, attempt: message.attempt };
+        break;
+      case 'gear':
+        this.gear = message.gear;
+        break;
+      case 'turn':
+        this.turnWindowUntil = null;
+        break;
+      case 'line':
+        this.line = message.line;
+        break;
+      default:
+        break;
+    }
+    return message;
+  }
 
-    let message: ClientRoomMessage | null = null;
+  /** The message a press would send now, without changing anything; null when the press means nothing. */
+  private messageFor(control: Control, clientTime: number): ClientRoomMessage | null {
     switch (control) {
       case 'tap': {
         const open = this.open;
         if (open === null || open.tapped) return null;
-        open.tapped = true;
-        this.lastTap = { fence: open.fence, attempt: open.attempt };
-        message = { type: 'tap', clientTime, fence: open.fence, attempt: open.attempt };
-        break;
+        return { type: 'tap', clientTime, fence: open.fence, attempt: open.attempt };
       }
       case 'gear': {
         const order = INPUT.gearOrder;
         const index = order.indexOf(this.gear);
-        this.gear = order[(index + 1) % order.length] ?? order[0];
-        message = { type: 'gear', gear: this.gear };
-        break;
+        return { type: 'gear', gear: order[(index + 1) % order.length] ?? order[0] };
       }
       case 'turn-left':
-      case 'turn-right': {
+      case 'turn-right':
         if (this.turnWindowUntil !== null && clientTime < this.turnWindowUntil) {
-          this.turnWindowUntil = null;
-          message = { type: 'turn', choice: control === 'turn-left' ? 'left' : 'right', clientTime };
-        } else {
-          this.line = this.line === 'center' ? 'angle' : 'center';
-          message = { type: 'line', line: this.line };
+          return { type: 'turn', choice: control === 'turn-left' ? 'left' : 'right', clientTime };
         }
-        break;
-      }
+        return { type: 'line', line: this.line === 'center' ? 'angle' : 'center' };
       default:
         return null;
     }
-
-    this.send(message);
-    return message;
   }
 
   /** The gear the rider asked for last (what the pace button shows). */
