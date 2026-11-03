@@ -16,7 +16,9 @@ import { describe, expect, it } from 'vitest';
 import { ClockSync } from '../../server/src/round/clockSync.js';
 import { CourseRunner, RUN, type RunnerEvent } from '../../server/src/round/courseRunner.js';
 import { ClientClock } from '../src/net/clientClock.js';
+import { ApproachWindow } from '../src/round/approachWindow.js';
 import { InstantHint, type Hint, type HintContext } from '../src/round/hint.js';
+import { markerHalfLengths } from '../src/scene/takeoffMarker.js';
 
 /** The favourable roll: a gallop tap in the clean tier keeps the rail up. */
 const favourable = (): number => 1;
@@ -456,5 +458,61 @@ describe('InstantHint.sync (audit K1 r2 #1)', () => {
     expect(hint.current()).toBeNull();
     hint.approach({ fence: 2, attempt: 1, t0: 9000 });
     expect(hint.tap(9000 + 140)?.outcome).toEqual(judged(140));
+  });
+});
+
+// ---- K1.1 step 6: one source of the window for the hint and the marker ------------------------------------------
+
+describe('InstantHint over the shared window source (K1.1 step 6)', () => {
+  /** A hint over a given window source, with the approach of fence 1, attempt 1 at server time 6000 open. */
+  function over(window: ApproachWindow): InstantHint {
+    const hint = new InstantHint(readyClock(0), context70, window);
+    hint.approach({ fence: 1, attempt: 1, t0: T0 });
+    return hint;
+  }
+
+  it('the hint exposes the very source it was built over; without one it builds its own for the context', () => {
+    const window = new ApproachWindow(context70);
+    expect(over(window).approachWindow).toBe(window);
+    expect(new InstantHint(readyClock(0), context70).approachWindow).toBeInstanceOf(ApproachWindow);
+  });
+
+  it("the hint's own setters reach the source: the line, the hard turn and the gear the marker reads are the hint's", () => {
+    const window = new ApproachWindow(context70);
+    const hint = over(window);
+    hint.setLine('angle');
+    hint.setHardTurn(true);
+    hint.setGear('extended');
+    expect(window.stateAt(T0)).toMatchObject({ angleSharp: true, recentHardTurn: true, gear: 'extended' });
+  });
+
+  it('the hint judges with the source: a sharp line and a hard turn set on the SOURCE narrow the hint\'s window too', () => {
+    const window = new ApproachWindow(context70);
+    window.setLine('angle');
+    window.setHardTurn(true);
+    const clean = window.windowAt(T0 + 10).cleanMs; // 157.5 × 0.8 × 0.7 = 88.2 ms
+    expect(clean).toBeCloseTo(157.5 * 0.8 * 0.7, 6);
+    expect(over(window).tap(T0 + Math.floor(clean))?.outcome.kind).toBe('clean');
+    expect(over(window).tap(T0 + Math.ceil(clean) + 1)?.outcome.kind).toBe('runout'); // a miss off the sharp line
+  });
+
+  it('the same window for the hint and the marker for the same state: the band\'s half-length is the hint\'s clean bound at the approach speed', () => {
+    const window = new ApproachWindow(context70);
+    window.setLine('angle');
+    const at = T0 + 20;
+    const tiers = window.windowAt(at);
+    const band = markerHalfLengths(tiers, 5);
+    expect(band?.cleanHalfM).toBeCloseTo((tiers.cleanMs / 1000) * 5, 9);
+    expect(band?.perfectHalfM).toBeCloseTo((tiers.perfectMs / 1000) * 5, 9);
+    // Inside the band's clean bound the hint says clean, just outside it says the miss.
+    expect(over(window).tap(T0 + Math.floor(tiers.cleanMs))?.outcome.kind).toBe('clean');
+    expect(over(window).tap(T0 - Math.ceil(tiers.cleanMs) - 1)?.outcome.kind).toBe('runout');
+  });
+
+  it('negative: without a sharp line or a hard turn the same offset is clean, not a miss — the narrowing comes from the source alone', () => {
+    const window = new ApproachWindow(context70);
+    const narrowed = 157.5 * 0.8 * 0.7;
+    expect(over(window).tap(T0 + Math.ceil(narrowed) + 1)?.outcome.kind).toBe('clean');
+    expect(window.windowAt(T0).cleanMs).toBeCloseTo(157.5, 6);
   });
 });

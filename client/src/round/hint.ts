@@ -1,6 +1,8 @@
 // The instant hint (plan 2.3, matrix row 3): the SAME judge as the server (judgeAttempt from shared/), run on
 // the client the moment the rider taps, so the caption appears at once; the server's verdict (the 'takeoff'
-// event, ≤150 ms later on a normal network) replaces it when they differ — the server always wins.
+// event, ≤150 ms later on a normal network) replaces it when they differ — the server always wins. K1.1 step 6:
+// the approach state and the window come from the one shared source, ApproachWindow (approachWindow.ts), which
+// the take-off marker reads too; the hint keeps no copy of its own.
 import {
   judgeAttempt,
   NO_TAP_LIMIT_MS,
@@ -12,6 +14,7 @@ import {
   type TakeoffOutcome,
 } from '@open-jumps/shared';
 import type { ClientClock } from '../net/clientClock.js';
+import { ApproachWindow } from './approachWindow.js';
 
 export interface HintContext {
   heightClass: HeightClass;
@@ -52,19 +55,33 @@ const favourableRoll = (): number => 1;
  * What the client knows about its own approach — its best guess, never the truth: gear from the state, the
  * line from its own command, a hard turn from its own last turn outcome; spooks and the lead-horse bonus are
  * unknown here (false), so the hint can only be stricter than the server, never more generous.
+ *
+ * K1.1 step 6 — the shared source: the hint is built over an ApproachWindow (the one given, or its own for the
+ * context) and exposes it as approachWindow, so the game draws the take-off marker from the very object the hint
+ * judges with. tap(clientTime) judges with approachWindow.stateAt(clientTime) and approachWindow.windowAt(clientTime);
+ * setGear (at the clock's now), setLine, setHardTurn and configure forward to it, and a cleared verdict spends its
+ * hard turn (clearedFence). assumedApproach moves into ApproachWindow — no second copy stays here.
+ * K1.1 contract stage: the hint still judges with its K1 copy below; approachWindow is the source it will use.
  */
 export class InstantHint {
   private readonly clock: ClientClock;
   private context: HintContext;
+  private readonly source: ApproachWindow;
   private gear: Gear = 'collected';
   private line: 'center' | 'angle' = 'center';
   private hardTurn = false;
   private open: OpenApproach | null = null;
   private shown: Hint | null = null;
 
-  constructor(clock: ClientClock, context: HintContext) {
+  constructor(clock: ClientClock, context: HintContext, approachWindow: ApproachWindow = new ApproachWindow(context)) {
     this.clock = clock;
     this.context = context;
+    this.source = approachWindow;
+  }
+
+  /** The shared source of the approach state and the window (K1.1 step 6): what the hint judges with and the marker reads. */
+  get approachWindow(): ApproachWindow {
+    return this.source;
   }
 
   configure(context: HintContext): void {
