@@ -54,4 +54,13 @@ export class HeatSchedule {
   isComplete(): boolean {
     return this.index >= this.plan.length;
   }
+
+  /**
+   * Whether a heat with riders comes after heat `index` in the plan as it stands now: a rider who left is already out
+   * of every future heat, and an emptied heat is skipped on advance — so it is the answer to "is there a next heat?"
+   * at the end of heat `index` (audit K1 r3 #6).
+   */
+  hasHeatAfter(index: number): boolean {
+    return this.plan.some((heat, i) => i > index && heat.length > 0);
+  }
 }

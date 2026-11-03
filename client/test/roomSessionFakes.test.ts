@@ -15,6 +15,7 @@ const state = (over: Partial<LobbyStateSnapshot> = {}): LobbyStateSnapshot => ({
   participants: {},
   phase: 'lobby',
   heatIndex: -1,
+  nextHeat: false,
   roundClockMs: 0,
   riders: {},
   ...over,

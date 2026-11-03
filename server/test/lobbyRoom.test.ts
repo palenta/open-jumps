@@ -77,8 +77,9 @@ describe('signing in to the live room', () => {
     await room.waitForNextPatch();
     expect(room.clients).toHaveLength(1);
     const state = client.state.toJSON() as Record<string, unknown>;
-    // B2 added the class fields (phase, heatIndex, roundClockMs, riders); still no names of those waiting at the door.
-    expect(Object.keys(state).sort()).toEqual(['code', 'entryOpen', 'heatIndex', 'hostId', 'participants', 'pendingCount', 'phase', 'riders', 'roundClockMs']);
+    // B2 added the class fields (phase, heatIndex, roundClockMs, riders; nextHeat with audit K1 r3 #6); still no names
+    // of those waiting at the door.
+    expect(Object.keys(state).sort()).toEqual(['code', 'entryOpen', 'heatIndex', 'hostId', 'nextHeat', 'participants', 'pendingCount', 'phase', 'riders', 'roundClockMs']);
     expect(state.hostId).toBe(host.account.id);
     const participants = state.participants as Record<string, Record<string, unknown>>;
     expect(Object.keys(participants)).toEqual([host.account.id]);

@@ -115,6 +115,11 @@ export interface LobbyStateSnapshot {
   participants: Record<string, ParticipantView>;
   phase: RoomPhase;
   heatIndex: number;
+  /**
+   * True during 'results' while another heat of the class follows — by the heat schedule at that boundary, riders
+   * who left already out of it — false otherwise, the last heat's results included (audit K1 r3 #6).
+   */
+  nextHeat: boolean;
   roundClockMs: number;
   riders: Record<string, RiderView>;
 }

@@ -1078,3 +1078,61 @@ describe('a rider admitted over HTTP who never connected rides in a class her po
     await hostSeat.client.leave();
   }, 30000);
 });
+
+describe("the results boundary says whether another heat follows (audit K1 r3 #6)", () => {
+  /** Every (phase, heat, nextHeat) the host's state goes through, in order, without repeats. */
+  function phaseLog(seat: Seat): string[] {
+    const log: string[] = [];
+    seat.client.onStateChange((state) => {
+      const entry = `${state.phase}#${String(state.heatIndex)}:${String(state.nextHeat)}`;
+      if (log.at(-1) !== entry) log.push(entry);
+    });
+    return log;
+  }
+  const resultsOf = (log: string[]) => log.filter((entry) => entry.startsWith('results#'));
+
+  /** The host (category C, 70) with three more riders of 70 and one of category D (80): heats [the four of 70], [the 80]. */
+  async function classOfFive() {
+    const { entry, room, riders } = await openRoom(4);
+    const host = riders[0] as Rider;
+    const dora = await registerRider(services, uniqueRiderName('Dora'), '1234', 'Nube', 'D');
+    await services.rooms.requestJoin(entry.code, dora.account.id);
+    services.rooms.hostAction(entry.code, host.account.id, { type: 'admit', accountId: dora.account.id });
+    const hostSeat = await sit(room.roomId, entry.code, host.token, host.account.id);
+    const log = phaseLog(hostSeat);
+    await startRiding(hostSeat, 'lowest-class-first');
+    const heats = (room as unknown as { flow: { schedule: { heats: readonly (readonly string[])[] } } }).flow.schedule.heats;
+    expect(heats.map((heat) => heat.length)).toEqual([4, 1]);
+    expect(heats[1]).toEqual([dora.account.id]);
+    return { entry, host, dora, hostSeat, log };
+  }
+
+  it('a class of two riders is one heat: its results say no heat follows', async () => {
+    const { entry, room, riders } = await openRoom(2);
+    const hostSeat = await sit(room.roomId, entry.code, (riders[0] as Rider).token, (riders[0] as Rider).account.id);
+    const log = phaseLog(hostSeat);
+    await startRiding(hostSeat);
+    await until(() => hostSeat.client.state.phase === 'done', 30000, "phase 'done'");
+    expect(resultsOf(log)).toEqual(['results#0:false']);
+    expect(hostSeat.client.state.nextHeat).toBe(false);
+    await hostSeat.client.leave();
+  }, 40000);
+
+  it('a class of five is two heats: the first results say another heat follows, the last say none', async () => {
+    const { hostSeat, log } = await classOfFive();
+    await until(() => hostSeat.client.state.phase === 'done', 60000, "phase 'done'");
+    expect(resultsOf(log)).toEqual(['results#0:true', 'results#1:false']);
+    await hostSeat.client.leave();
+  }, 70000);
+
+  it('the only rider of the next heat is kicked during the first: the first results say no heat follows, and the class is done after them', async () => {
+    const { entry, host, dora, hostSeat, log } = await classOfFive();
+    expect(services.rooms.hostAction(entry.code, host.account.id, { type: 'kick', accountId: dora.account.id }).ok).toBe(true);
+    await until(() => hostSeat.client.state.phase === 'done', 30000, "phase 'done'");
+    expect(resultsOf(log)).toEqual(['results#0:false']);
+    // Straight to 'done': the emptied heat is never walked nor ridden.
+    expect(log.at(-1)).toMatch(/^done#\d+:false$/);
+    expect(log.filter((entry) => entry.startsWith('walk#1') || entry.startsWith('riding#1'))).toEqual([]);
+    await hostSeat.client.leave();
+  }, 40000);
+});

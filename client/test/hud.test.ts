@@ -40,6 +40,7 @@ const snapshot = (over: Partial<LobbyStateSnapshot> = {}): LobbyStateSnapshot =>
   },
   phase: 'riding',
   heatIndex: 0,
+  nextHeat: false,
   roundClockMs: 42_340,
   riders: {
     host: rider('host', { heightClass: 70, positionM: 31, gear: 'extended', nextFence: 2, faults: 4, lastLabel: 'batida_corta' }),

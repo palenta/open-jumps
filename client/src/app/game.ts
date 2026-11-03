@@ -225,7 +225,9 @@ interface RoundModules {
  *   class-course first) — the heat that just ended as [data-heat-done] + [data-list="heat"] > li[data-id]
  *   (heatResultsModel of the state's riders — the heat's final values, which the room publishes in the patch that
  *   says 'results', audit K1 r2 #2), [data-waiting] with the next step, and [data-action="leave"] (audit K1 r1 #2:
- *   never an empty page).
+ *   never an empty page). The next step is translate('results.nextHeat') only while the state's nextHeat says the
+ *   server will ride another heat; the last heat's results and 'done' read translate('results.classDoneWaiting')
+ *   (audit K1 r3 #6).
  * - Lifecycle: document 'visibilitychange' (visible) and window 'pageshow' → session.resume(); window 'resize' →
  *   resize(). destroy() removes the listeners, leaves the session and disposes the scene.
  * - Names (captions, the labels over the horses, the heat screen, the class table) come from the state's
@@ -865,7 +867,9 @@ export function createGame(deps: GameDeps): Game {
       <ul data-list="heat">${rows
         .map((row) => `<li data-id="${escapeHtml(row.accountId)}" ${row.isOwn ? 'class="own"' : ''}>${escapeHtml(row.name)} · ${escapeHtml(row.faultsText)}${row.statusText ? ` · ${escapeHtml(row.statusText)}` : ''}</li>`)
         .join('')}</ul>`;
-    const waiting = current?.phase === 'done' ? t('results.classDoneWaiting') : t('results.nextHeat');
+    // The server says whether another heat follows (audit K1 r3 #6): its results phase lasts as long after the last
+    // heat as between two, and only the schedule knows which heat was the last.
+    const waiting = current?.phase === 'results' && current.nextHeat ? t('results.nextHeat') : t('results.classDoneWaiting');
     return `<section class="screen results">
       ${heat}
       <p data-waiting class="status">${escapeHtml(waiting)}</p>

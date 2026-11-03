@@ -203,6 +203,11 @@ export class ClassFlow {
     return events;
   }
 
+  /** Whether another heat will be ridden after heat `heatIndex`, by the schedule as it stands now (riders who left are out of it). */
+  hasHeatAfter(heatIndex: number): boolean {
+    return this.heats.hasHeatAfter(heatIndex);
+  }
+
   /** Commands reach the running heat only; others are dropped. */
   enqueue(command: RiderCommand): void {
     this.engine()?.enqueue(command);

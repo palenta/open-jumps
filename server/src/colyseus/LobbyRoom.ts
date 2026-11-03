@@ -87,6 +87,11 @@ export interface LobbyRoomDeps {
  * - Every `riders` entry and every 'class-table' row carries riderName and ponyName (profiles learnt at onAuth, or
  *   read from the accounts before the class is built for a rider admitted over the directory who never connected): a
  *   rider who leaves the room for good is no participant any more, and the client names her from these.
+ * - `nextHeat` in the state is true during 'results' while another heat of the class will be ridden after it, false
+ *   otherwise (the last heat's results, every other phase): set in the same patch that says 'results', from the heat
+ *   schedule as it stands at that boundary (riders who left are out of it, and an emptied heat is skipped), and kept
+ *   true to it — a rider leaving (or kicked) during the results may turn it off. The client's results screen reads it
+ *   to say "the next heat" or "the class is finished" (audit K1 r3 #6).
  * - When a heat ends, every result is written with results.insertOnce; the class table is sent as 'class-table'
  *   { table } to everyone when the class is done, and to any client that joins while the class is already done.
  *   A client joining during a class gets 'class-course', then 'class-phase' for the phase in progress (with its
@@ -179,6 +184,8 @@ export const LobbyState = schema(
     // Part B2 — the class:
     phase: t.string().default('lobby'),
     heatIndex: t.number().default(-1),
+    // True during 'results' when another heat of the class follows (audit K1 r3 #6); false otherwise.
+    nextHeat: t.boolean().default(false),
     roundClockMs: t.number().default(0),
     riders: t.map(RiderView),
   },
@@ -341,6 +348,7 @@ export class LobbyRoom extends Room<{ state: LobbyState }> {
       if (roomId !== this.entryId) return;
       this.rejectReconnection(revocation.accountId);
       this.flow?.riderLeft(revocation.accountId, this.serverNow());
+      this.syncNextHeat(); // a kick during the results may leave no heat to follow
       for (const client of this.clients) {
         if (this.accountBySession.get(client.sessionId) === revocation.accountId) client.leave(KICKED_CLOSE_CODE);
       }
@@ -618,6 +626,14 @@ export class LobbyRoom extends Room<{ state: LobbyState }> {
     const events = flow.tick(now);
     for (const event of events) this.applyClassEvent(flow, event);
     this.syncRiders(flow);
+    this.syncNextHeat();
+  }
+
+  /** `nextHeat`: during 'results', whether the schedule still has a heat after this one (audit K1 r3 #6). */
+  private syncNextHeat(): void {
+    const flow = this.flow;
+    const next = flow !== null && flow.phase === 'results' && flow.hasHeatAfter(flow.heatIndex);
+    if (this.state.nextHeat !== next) this.state.nextHeat = next;
   }
 
   private applyClassEvent(flow: ClassFlow, event: ClassEvent): void {

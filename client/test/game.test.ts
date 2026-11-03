@@ -431,6 +431,7 @@ const snapshot = (over: Partial<LobbyStateSnapshot> = {}): LobbyStateSnapshot =>
   },
   phase: 'lobby',
   heatIndex: -1,
+  nextHeat: false,
   roundClockMs: 0,
   riders: {},
   ...over,
@@ -1762,10 +1763,12 @@ describe('the results screen', () => {
 
 describe('between the heats and at the end (audit K1 r1 #2)', () => {
   /** Heat 1 is over: Maria finished with a rail, Ana was eliminated; the state still carries the heat's riders. */
+  /** Heat 1 just ended and another heat follows (the server's nextHeat), unless `over` says otherwise. */
   const heatOver = (over: Partial<LobbyStateSnapshot> = {}): LobbyStateSnapshot =>
     snapshot({
       phase: 'results',
       heatIndex: 0,
+      nextHeat: true,
       roundClockMs: 61_000,
       riders: {
         host: rider('host', { nextFence: 2, positionM: 50, faults: 4, status: 'finished', lastLabel: 'batida_corta' }),
@@ -1850,6 +1853,27 @@ describe('between the heats and at the end (audit K1 r1 #2)', () => {
     expect(h.root.querySelector('[data-waiting]')).toBeNull();
     expect(h.root.querySelector('[data-list="results"] tr[data-id="host"]')).not.toBeNull();
     expect(h.root.querySelector('[data-action="again"]')).toBeNull(); // a guest
+  });
+
+  it('the results of the LAST heat (the server says no heat follows): the waiting text says the class is finished, never "the next manga", in both locales (audit K1 r3 #6)', async () => {
+    const h = await inRound();
+    h.session().emitState(heatOver({ nextHeat: false }));
+    await settle();
+    expect(h.root.dataset.screen).toBe('results');
+    expect(h.root.querySelector('[data-list="heat"] [data-id="host"]')).not.toBeNull();
+    expect(text(h.root.querySelector('[data-waiting]'))).toBe('Class finished — the results are coming…');
+    click(h.root, '[data-action="locale"][data-locale="es"]');
+    expect(text(h.root.querySelector('[data-waiting]'))).toBe('Prueba terminada — ya llegan los resultados…');
+  });
+
+  it('a rider of the next heat leaves during the results: the server turns nextHeat off and the waiting text follows (audit K1 r3 #6)', async () => {
+    const h = await inRound();
+    h.session().emitState(heatOver());
+    await settle();
+    expect(text(h.root.querySelector('[data-waiting]'))).toBe('The next manga starts in a moment…');
+    h.session().emitState(heatOver({ nextHeat: false }));
+    await settle();
+    expect(text(h.root.querySelector('[data-waiting]'))).toBe('Class finished — the results are coming…');
   });
 
   it('the intermediate results are in the locale: Spanish', async () => {

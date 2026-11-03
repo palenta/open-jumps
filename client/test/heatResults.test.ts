@@ -98,6 +98,9 @@ describe('the heat screen at the results boundary (audit K1 r2 #2)', () => {
     ana.send({ type: 'gear', gear: 'extended' }); // Ana is done at ≈ 8.5 s, Maria at 10.1 s
     const screen = await heatScreenRows(app);
     const rows = await engineRows(code, 2);
+    // A class of two is one heat: its results are the class's last, and the screen says so (audit K1 r3 #6).
+    expect(app.game.session?.state?.phase).toBe('results');
+    expect(text(app.root.querySelector('[data-waiting]'))).toBe(translate('en', 'results.classDoneWaiting'));
     const mariaRow = rows.find((r) => r.accountId === maria.profile.id);
     expect(mariaRow).toMatchObject({ status: 'finished', faults: 5 }); // the chip (4) and one time fault
     expect(screen.get(maria.profile.id)).toBe(expectedRow(maria, mariaRow ?? { faults: -1, status: '' }));

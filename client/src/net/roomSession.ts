@@ -301,6 +301,7 @@ function toSnapshot(state: unknown): LobbyStateSnapshot | null {
     participants: snapshot.participants ?? {},
     phase: snapshot.phase ?? 'lobby',
     heatIndex: snapshot.heatIndex ?? -1,
+    nextHeat: snapshot.nextHeat ?? false,
     roundClockMs: snapshot.roundClockMs ?? 0,
     riders: snapshot.riders ?? {},
   };

@@ -69,4 +69,15 @@ describe('HeatSchedule', () => {
     expect(a.heats[0]).toEqual(['sixty', 'seventy', 'eighty', 'ninety']);
     expect(a.heats[1]).toEqual(['hundred']);
   });
+
+  it('hasHeatAfter: whether a heat with riders follows a given heat in the plan as it stands — departures included (audit K1 r3 #6)', () => {
+    const one = new HeatSchedule(riders(2), 'seed', 'random');
+    expect(one.hasHeatAfter(0)).toBe(false);
+    const two = new HeatSchedule(riders(5), 'seed', 'random');
+    expect(two.hasHeatAfter(0)).toBe(true);
+    expect(two.hasHeatAfter(1)).toBe(false);
+    two.riderLeft(two.heats[1]![0]!); // the only rider of heat 2 leaves during heat 1
+    expect(two.hasHeatAfter(0)).toBe(false);
+    expect(two.advance()).toBeNull();
+  });
 });
