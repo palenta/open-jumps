@@ -1,7 +1,7 @@
 // The round screen's view model (plan 1.13, 1.7): the next fence, faults and time large, the gear as a term,
 // the last caption, the riders of the heat for spectators, and the results table per height class — pure
 // functions of the room snapshot and the locale, so the DOM layer only prints what it gets.
-import { MESSAGES } from '@open-jumps/shared';
+import { caption, MESSAGES } from '@open-jumps/shared';
 import { describe, expect, it } from 'vitest';
 import { heatResultsModel, hudModel, namesFrom, resultsModel, riderOnPony, type HudInput, type HudNames } from '../src/hud/viewModel.js';
 import type { ClassTableRowWire, ClassTableWire, LobbyStateSnapshot, RiderView } from '../src/net/types.js';
@@ -277,5 +277,30 @@ describe('namesFrom: a rider who left the room is named by her rider entry or he
     const names = namesFrom(state, { '60': [row('bea', 'Bea', 'Nube')] });
     expect(heatResultsModel(state, names, 'en', 'host').map((r) => r.name)).toEqual(['cris', 'Bea on Nube']);
     expect(resultsModel({ '60': [row('bea', 'Bea', 'Nube')] }, names, 'es', 'host')[0]?.rows[0]?.name).toBe('Bea con Nube');
+  });
+});
+
+describe('the turn captions the HUD shows say why the horse stopped (K1.1 step 8)', () => {
+  const dakota = { rider: 'Maria', pony: 'Dakota', ponyGender: 'yegua' as const };
+
+  it('a missed turn: the term and the reason, in English and in Spanish', () => {
+    const en = hudModel(input({ caption: caption('en', { type: 'turn', label: 'recto' }, dakota) })).caption;
+    expect(en).toContain('¡Recto!');
+    expect(en).toContain('missed the turn');
+    const es = hudModel(input({ locale: 'es', caption: caption('es', { type: 'turn', label: 'recto' }, dakota) })).caption;
+    expect(es).toContain('¡Recto!');
+    expect(es).toContain('se pasó el giro');
+  });
+
+  it('a wrong turn: the term and the reason, in English and in Spanish', () => {
+    const en = hudModel(input({ caption: caption('en', { type: 'turn', label: 'recorrido_equivocado' }, dakota) })).caption;
+    expect(en).toContain('recorrido equivocado');
+    expect(en).toContain('wrong way');
+    const es = hudModel(input({ locale: 'es', caption: caption('es', { type: 'turn', label: 'recorrido_equivocado' }, dakota) })).caption;
+    expect(es).toContain('hacia el otro lado');
+  });
+
+  it('negative: a good turn needs no reason — the term alone', () => {
+    expect(hudModel(input({ caption: caption('en', { type: 'turn', label: 'giro_cerrado' }, dakota) })).caption).toBe('Dakota: giro cerrado');
   });
 });

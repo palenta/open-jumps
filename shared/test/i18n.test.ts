@@ -110,6 +110,53 @@ describe('dictionaries', () => {
   });
 });
 
+/** The keys K1.1 adds (step 8): the reasons a touch did nothing, the gear and line toasts, the walk map's captions. */
+const K1_1_KEYS = [
+  'hud.pressNote.not-armed',
+  'hud.pressNote.already-tapped',
+  'hud.pressNote.cannot-send',
+  'hud.pressNote.too-old',
+  'hud.toast.gear.collected',
+  'hud.toast.gear.extended',
+  'hud.toast.gear.gallop',
+  'hud.toast.line.center',
+  'hud.toast.line.angle',
+  'walk.map.label',
+  'walk.map.start',
+  'walk.map.finish',
+];
+
+describe('the K1.1 strings (step 8)', () => {
+  it.each(K1_1_KEYS)('%s is a key of both locales, non-empty, without Cyrillic', (key) => {
+    expect(isMessageKey(key), key).toBe(true);
+    for (const locale of locales) {
+      const text = translateKey(locale, key);
+      expect(text, `${locale} ${key}`).not.toBe(key);
+      expect(text.trim().length, `${locale} ${key}`).toBeGreaterThan(0);
+      expect(text, `${locale} ${key}`).not.toMatch(/[Ѐ-ӿ]/);
+    }
+  });
+
+  it('the gear toasts name the gear by its term in both locales', () => {
+    for (const locale of locales) {
+      expect(translateKey(locale, 'hud.toast.gear.collected'), locale).toContain(TERMS.galope_reunido);
+      expect(translateKey(locale, 'hud.toast.gear.extended'), locale).toContain(TERMS.galope_largo);
+      expect(translateKey(locale, 'hud.toast.gear.gallop'), locale).toContain(TERMS.a_toda_carrera);
+    }
+  });
+
+  it('the reasons of an ignored touch differ from each other and between the locales', () => {
+    const reasons = ['not-armed', 'already-tapped', 'cannot-send', 'too-old'].map((reason) => `hud.pressNote.${reason}`);
+    for (const locale of locales) expect(new Set(reasons.map((key) => translateKey(locale, key))).size, locale).toBe(4);
+    for (const key of reasons) expect(translateKey('es', key), key).not.toBe(translateKey('en', key));
+  });
+
+  it('negative: no reason for the two outcomes that say nothing (not-riding, no-control)', () => {
+    expect(isMessageKey('hud.pressNote.not-riding')).toBe(false);
+    expect(isMessageKey('hud.pressNote.no-control')).toBe(false);
+  });
+});
+
 describe('TERMS', () => {
   it('values are Spanish lowercase words or phrases, or a shout opening with ¡', () => {
     for (const [id, value] of Object.entries(TERMS)) {
@@ -228,9 +275,30 @@ describe('caption', () => {
   it('turn labels: the term, or the label as written when unknown', () => {
     expect(caption('en', { type: 'turn', label: 'giro_cerrado' }, names)).toBe('Dakota: giro cerrado');
     expect(caption('en', { type: 'turn', label: 'giro_abierto' }, names)).toBe('Dakota: giro abierto');
-    expect(caption('en', { type: 'turn', label: 'recto' }, names)).toBe('Dakota: ¡Recto!');
-    expect(caption('en', { type: 'turn', label: 'recorrido_equivocado' }, names)).toBe('Dakota: recorrido equivocado');
     expect(caption('en', { type: 'turn', label: 'zzz' }, names)).toBe('Dakota: zzz');
+  });
+
+  it('the two turns that stop the horse say why in words of the locale, after the pony and the term (K1.1 step 8)', () => {
+    const recto = { en: caption('en', { type: 'turn', label: 'recto' }, names), es: caption('es', { type: 'turn', label: 'recto' }, names) };
+    expect(recto.en.startsWith('Dakota: ¡Recto!')).toBe(true);
+    expect(recto.en).toContain('missed the turn');
+    expect(recto.es.startsWith('Dakota: ¡Recto!')).toBe(true);
+    expect(recto.es).toContain('se pasó el giro');
+    const wrong = {
+      en: caption('en', { type: 'turn', label: 'recorrido_equivocado' }, names),
+      es: caption('es', { type: 'turn', label: 'recorrido_equivocado' }, names),
+    };
+    expect(wrong.en.startsWith('Dakota: recorrido equivocado')).toBe(true);
+    expect(wrong.en).toContain('wrong way');
+    expect(wrong.es.startsWith('Dakota: recorrido equivocado')).toBe(true);
+    expect(wrong.es).toContain('hacia el otro lado');
+  });
+
+  it('negative: the terms stay terms — reached as {term:…} in both locales, never spelled out', () => {
+    for (const locale of locales) {
+      expect(MESSAGES[locale]['caption.turn.recto']).toContain('{term:recto}');
+      expect(MESSAGES[locale]['caption.turn.recorrido_equivocado']).toContain('{term:recorrido_equivocado}');
+    }
   });
 
   it('the finish shows the round time in tenths', () => {
