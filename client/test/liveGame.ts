@@ -6,8 +6,8 @@
 import { matchMaker } from 'colyseus';
 import { Window } from 'happy-dom';
 import type { LobbyState } from '../../server/src/colyseus/LobbyRoom.js';
-import { createGame, type Game, type SceneLike } from '../src/app/game.js';
-import { layoutFor } from '../src/input/layout.js';
+import { createGame, type Game, type SceneFrame, type SceneLike } from '../src/app/game.js';
+import { layoutFor, type Control } from '../src/input/layout.js';
 import { RoomSession, type RetrySettings } from '../src/net/roomSession.js';
 import type { ClientRoomMessage, ServerMessage } from '../src/net/types.js';
 import { ORIGIN, until, type Device } from './helpers.js';
@@ -23,10 +23,18 @@ Object.assign(globalThis, {
 
 /** The arena of an iPhone 16e in landscape. */
 export const ARENA = { left: 0, top: 0, width: 844, height: 390 };
-const TAP_ZONE = layoutFor(ARENA.width, ARENA.height).zones.tap;
-const TAP_POINT = { clientX: TAP_ZONE.x + TAP_ZONE.w / 2, clientY: TAP_ZONE.y + TAP_ZONE.h / 2 };
+const ARENA_LAYOUT = layoutFor(ARENA.width, ARENA.height);
+/** The middle of a control's zone on the arena (viewport coordinates: the arena fills the viewport). */
+const middleOf = (control: Control) => {
+  const zone = ARENA_LAYOUT.zones[control];
+  return { clientX: zone.x + zone.w / 2, clientY: zone.y + zone.h / 2 };
+};
+const TAP_POINT = middleOf('tap');
 
-const scene: SceneLike = { mount: () => undefined, setCourse: () => undefined, render: () => undefined, dispose: () => undefined };
+/** A scene that draws nothing and keeps every frame the game hands it (the take-off marker, the own horse). */
+function recordingScene(frames: SceneFrame[]): SceneLike {
+  return { mount: () => undefined, setCourse: () => undefined, render: (frame) => void frames.push(frame), dispose: () => undefined };
+}
 const noWindow = { addEventListener: () => undefined, removeEventListener: () => undefined };
 
 export interface AppUnderTest {
@@ -45,6 +53,8 @@ export interface AppUnderTest {
   roomId(): string;
   /** The device's own clock, the one the game reads (a finger's timeStamp is in its units, as in the browser). */
   clock: Device['clock'];
+  /** Every frame the game handed to the scene, in order (game.frame(now) draws one). */
+  frames: SceneFrame[];
 }
 
 export interface AppOptions {
@@ -59,6 +69,7 @@ export async function appFor(device: Device, options: AppOptions = {}): Promise<
   const sent: ClientRoomMessage[] = [];
   const attempted: ClientRoomMessage[] = [];
   const received: ServerMessage[] = [];
+  const frames: SceneFrame[] = [];
   let roomId = '';
   const game = createGame({
     document: dom.document as unknown as Document,
@@ -83,12 +94,12 @@ export async function appFor(device: Device, options: AppOptions = {}): Promise<
       return session;
     },
     clock: device.clock,
-    scene,
+    scene: recordingScene(frames),
     locale: 'en',
     measure: () => ({ ...ARENA }),
   });
   await until(() => root.dataset.screen === 'home', 5000, 'the home screen');
-  return { game, root, sent, attempted, received, roomId: () => roomId, clock: device.clock };
+  return { game, root, sent, attempted, received, roomId: () => roomId, clock: device.clock, frames };
 }
 
 export function click(root: HTMLElement, selector: string): void {
@@ -115,6 +126,15 @@ export function tapZone(app: AppUnderTest, timeStamp: number = app.clock.now()):
   const arena = app.root.querySelector('[data-arena]');
   if (arena === null) throw new Error('no arena on screen');
   const event = new dom.PointerEvent('pointerdown', { ...TAP_POINT, bubbles: true, cancelable: true });
+  Object.defineProperty(event, 'timeStamp', { value: timeStamp });
+  arena.dispatchEvent(event as unknown as Event);
+}
+
+/** A finger on the middle of a control's zone that landed at `timeStamp` (default: now), as tapZone does for the tap. */
+export function pressControl(app: AppUnderTest, control: Control, timeStamp: number = app.clock.now()): void {
+  const arena = app.root.querySelector('[data-arena]');
+  if (arena === null) throw new Error('no arena on screen');
+  const event = new dom.PointerEvent('pointerdown', { ...middleOf(control), bubbles: true, cancelable: true });
   Object.defineProperty(event, 'timeStamp', { value: timeStamp });
   arena.dispatchEvent(event as unknown as Event);
 }

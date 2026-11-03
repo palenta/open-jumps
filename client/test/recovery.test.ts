@@ -6,11 +6,13 @@
 // fresh join through the Reconnect button — and her finger on the tap zone at t0 + 100 ms must go out and be judged
 // by the server as her own take-off. And a finger the page handled too late for the judge (audit K1 r4 #1) is not a
 // take-off at the moment of its handling: nothing goes out, and her next, timely tap is the one the server judges.
+// K1.1 step 7 (matrix row 16): a tap after the clean tier while the approach is still open — the marker says "late"
+// and the tap still goes out; the hint and the judge both call it a chip ("close", a rail down).
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { RoomSession, type RetrySettings } from '../src/net/roomSession.js';
 import type { RoundEventWire, ServerMessage } from '../src/net/types.js';
 import { bootApp, newDevice, sleep, until, type Device, type LiveApp } from './helpers.js';
-import { appFor, click, dom, dropFromServer, serverRider, tapZone, type AppUnderTest } from './liveGame.js';
+import { appFor, click, dom, dropFromServer, serverRider, tapZone, text, type AppUnderTest } from './liveGame.js';
 
 let live: LiveApp;
 
@@ -202,6 +204,36 @@ describe('a touch the page handled too late for the judge (audit K1 r4 #1)', () 
     const expected = (maria.clock.toServer(touch) ?? Number.NaN) - approach.t0;
     expect(Math.abs((takeoff?.offsetMs ?? Number.NaN) - expected)).toBeLessThanOrEqual(1);
     expect(['clean', 'perfect', 'chip']).toContain(takeoff?.outcome.kind);
+    app.game.destroy();
+    await ana.leave();
+  }, 40000);
+});
+
+describe('a late tap while the approach is still open (K1.1 step 7, matrix row 16)', () => {
+  it('past t0 + cleanMs the marker reads late; the tap at t0 + 250 ms still goes out, and the hint and the judge both call it batida corta with a rail', async () => {
+    const { maria, app, ana } = await classWithWitness();
+    const id = maria.profile.id;
+    await until(() => roundEvents(app.received, 'approach', id).length > 0, 8000, 'her approach');
+    const approach = roundEvents(app.received, 'approach', id)[0];
+    if (!approach) throw new Error('no approach');
+    const takeoffAt = maria.clock.toClient(approach.t0);
+    if (takeoffAt === null) throw new Error('the clock is not ready');
+    // 70 cm in collected canter: the clean tier is ±157.5 ms, the "no tap" limit ±400 ms. 250 ms late is a chip.
+    await sleep(Math.max(0, takeoffAt + 250 - maria.clock.now()));
+    app.game.frame(maria.clock.now());
+    expect(app.frames.at(-1)?.takeoff).toMatchObject({ fence: approach.fence, state: 'late' });
+    const touch = maria.clock.now();
+    tapZone(app, touch);
+    expect(app.sent.filter((m) => m.type === 'tap')).toEqual([{ type: 'tap', clientTime: touch, fence: approach.fence, attempt: approach.attempt }]);
+    expect(app.root.querySelector('[data-control="tap"]')?.getAttribute('data-pressed')).toBe('sent');
+    expect(text(app.root.querySelector('[data-hud-caption]'))).toBe(`Dakota: batida corta at fence ${String(approach.fence)} — derribo`); // the instant hint
+    await until(() => roundEvents(app.received, 'takeoff', id).length > 0, 3000, "the server's verdict");
+    const takeoff = roundEvents(app.received, 'takeoff', id)[0];
+    expect(takeoff?.offsetMs ?? 0).toBeGreaterThan(157.5);
+    expect(takeoff?.offsetMs ?? 999).toBeLessThanOrEqual(400);
+    expect(takeoff?.outcome).toMatchObject({ kind: 'chip', label: 'batida_corta', faults: 4, cleared: true });
+    app.game.frame(maria.clock.now());
+    expect(app.frames.at(-1)?.takeoff ?? null).toBeNull(); // the verdict puts the band out
     app.game.destroy();
     await ana.leave();
   }, 40000);
