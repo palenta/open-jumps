@@ -1,5 +1,5 @@
 // Shared test fixtures for the server: a controllable clock, seeded randomness and a wired service set.
-import { createRng } from '@open-jumps/shared';
+import { createRng, type PonyCategory } from '@open-jumps/shared';
 import { AccountService } from '../src/auth/accounts.js';
 import { SessionService } from '../src/auth/sessions.js';
 import { ClubService } from '../src/clubs/clubs.js';
@@ -62,13 +62,14 @@ export function uniqueRiderName(prefix = 'Rider'): string {
 }
 
 /** Register a rider with sane defaults; throws if registration fails (tests that expect failure call register directly). */
-export async function registerRider(services: Services, riderName: string, pin = '1234', ponyName = 'Dakota') {
+export async function registerRider(services: Services, riderName: string, pin = '1234', ponyName = 'Dakota', ponyCategory?: PonyCategory) {
   const result = await services.accounts.register({
     riderName,
     pin,
     riderGender: 'girl',
     ponyName,
     ponyGender: 'yegua',
+    ...(ponyCategory !== undefined ? { ponyCategory } : {}),
   });
   if (!result.ok) throw new Error(`registration failed: ${result.error}`);
   return result.value;

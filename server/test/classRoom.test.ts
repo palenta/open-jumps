@@ -988,10 +988,12 @@ describe("the names of the heat's riders and of the class table: a rider who lef
     expect(view(friend.account.id)).toMatchObject({ riderName: friend.account.riderName, ponyName: 'Dakota' });
 
     await until(() => hostSeat.client.state.phase === 'done', 25000, "phase 'done'");
-    // Every row of every class (the absent rider never sent her settings: she rides in the default class).
+    // Every row of every class. The absent rider never sent her settings: she rides in the lowest class her pony's
+    // category allows (C → 70, audit K1 r3 #2), never in a class of no category.
     const named = (table: Record<string, ClassTableRowWire[]> | undefined) => Object.values(table ?? {}).flat().map((r) => [r.riderId, r.riderName, r.ponyName]).sort();
     const expected = [host, friend, absent].map((r) => [r.account.id, r.account.riderName, 'Dakota']).sort();
     expect(named(classTable(hostSeat)?.table)).toEqual(expected);
+    expect((classTable(hostSeat)?.table['70'] ?? []).map((r) => r.riderId)).toContain(absent.account.id);
     // A late joiner after the class is done never saw the friend as a participant: the table itself names her.
     const late = await sit(room.roomId, entry.code, absent.token, absent.account.id);
     await until(() => classTable(late) !== undefined, 2000, 'the table for the late joiner');
@@ -1000,4 +1002,79 @@ describe("the names of the heat's riders and of the class table: a rider who lef
     await late.client.leave();
     await hostSeat.client.leave();
   }, 45000);
+});
+
+describe('a rider admitted over HTTP who never connected rides in a class her pony category allows (audit K1 r3 #2)', () => {
+  it('categories C and D, no WebSocket before the start: the lowest class of each category in `riders`, kept after a late connection, and in the class table', async () => {
+    const host = await registerRider(services, uniqueRiderName('Host'));
+    const entry = services.rooms.createRoom(host.account.id, { clubId: null });
+    courseByCode.set(entry.code, LIVE_COURSE);
+    const room = await colyseus.createRoom<LobbyRoom>(LOBBY_ROOM_NAME, { code: entry.code });
+    const cara = await registerRider(services, uniqueRiderName('Cara'), '1234', 'Luna', 'C');
+    const dora = await registerRider(services, uniqueRiderName('Dora'), '1234', 'Nube', 'D');
+    for (const rider of [cara, dora]) {
+      await services.rooms.requestJoin(entry.code, rider.account.id);
+      services.rooms.hostAction(entry.code, host.account.id, { type: 'admit', accountId: rider.account.id });
+    }
+    const hostSeat = await sit(room.roomId, entry.code, host.token, host.account.id);
+    const view = (id: string) => hostSeat.client.state.riders.get(id);
+    await startRiding(hostSeat);
+    // One heat of three; the two absent riders were never seen by onAuth.
+    expect(view(cara.account.id)).toMatchObject({ heightClass: 70, riderName: cara.account.riderName, ponyName: 'Luna', autopilot: true });
+    expect(view(dora.account.id)).toMatchObject({ heightClass: 80, riderName: dora.account.riderName, ponyName: 'Nube', autopilot: true });
+    // Dora connects during the heat: the class frozen at the start stays.
+    const doraSeat = await sit(room.roomId, entry.code, dora.token, dora.account.id);
+    await sleep(300);
+    expect(doraSeat.client.state.riders.get(dora.account.id)?.heightClass).toBe(80);
+    expect(view(dora.account.id)?.heightClass).toBe(80);
+    await until(() => classTable(hostSeat) !== undefined, 30000, 'the class table');
+    const table = classTable(hostSeat)?.table ?? {};
+    expect(Object.keys(table).sort()).toEqual(['70', '80']);
+    expect((table['70'] ?? []).map((r) => r.riderId).sort()).toEqual([host.account.id, cara.account.id].sort());
+    expect((table['80'] ?? []).map((r) => [r.riderId, r.riderName, r.ponyName])).toEqual([[dora.account.id, dora.account.riderName, 'Nube']]);
+    await doraSeat.client.leave();
+    await hostSeat.client.leave();
+  }, 45000);
+
+  it('while the profiles are read a second start-class is refused and one class starts; a profile that cannot be read refuses the start and nothing starts', async () => {
+    const { entry, room, riders } = await openRoom(2);
+    const [host, absent] = riders as [Rider, Rider];
+    const hostSeat = await sit(room.roomId, entry.code, host.token, host.account.id);
+    const accounts = services.accounts as unknown as { getPublicProfile: (id: string) => Promise<unknown> };
+    const original = accounts.getPublicProfile;
+    try {
+      // Storage trouble: the start is refused, the room stays in the lobby, no course is announced.
+      accounts.getPublicProfile = () => Promise.reject(new Error('storage unavailable (test)'));
+      hostSeat.client.send('room', { type: 'start-class', order: 'random' });
+      await until(() => refusals(hostSeat).length > 0, 2000, 'the refusal');
+      expect(refusals(hostSeat)).toEqual(['class-not-ready']);
+      await sleep(200);
+      expect(hostSeat.client.state.phase).toBe('lobby');
+      expect(hostSeat.received.filter((m) => m.type === 'class-course')).toEqual([]);
+
+      // A slow read: a second start-class meanwhile is refused; once the profile lands exactly one class starts.
+      let release: () => void = () => undefined;
+      const gate = new Promise<void>((resolve) => (release = resolve));
+      accounts.getPublicProfile = async (id: string) => {
+        await gate;
+        return original.call(services.accounts, id);
+      };
+      hostSeat.client.send('room', { type: 'start-class', order: 'random' });
+      await sleep(100);
+      hostSeat.client.send('room', { type: 'start-class', order: 'random' });
+      await until(() => refusals(hostSeat).length > 1, 2000, 'the second refusal');
+      expect(refusals(hostSeat)).toEqual(['class-not-ready', 'class-running']);
+      expect(hostSeat.client.state.phase).toBe('lobby');
+      release();
+      await until(() => hostSeat.client.state.phase === 'walk', 3000, "phase 'walk'");
+      await sleep(200);
+      const courses = hostSeat.received.filter((m) => m.type === 'class-course').map((m) => (m.payload as { classNumber: number }).classNumber);
+      expect(courses).toEqual([1]);
+      await until(() => hostSeat.client.state.riders.size === 2, 3000, 'the heat in the state');
+      expect(hostSeat.client.state.riders.get(absent.account.id)).toMatchObject({ heightClass: 70, riderName: absent.account.riderName });
+    } finally {
+      accounts.getPublicProfile = original;
+    }
+    await hostSeat.client.leave();
+  }, 30000);
 });

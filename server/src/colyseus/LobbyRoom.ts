@@ -42,6 +42,12 @@ export interface LobbyRoomDeps {
  * Part B2 — the class inside the room (plan 1.7, 2.3), on top of the B1 door:
  * - Lobby settings: 'height' (a class allowed for the sender's pony category, plan 1.6) and 'assists' are kept per
  *   participant and frozen when the host sends 'start-class'; a change during a class applies to the next class.
+ *   Before the class is built every admitted participant — also one admitted over the directory who never opened a
+ *   WebSocket, whom onAuth never saw — has her profile and settings valid for her pony category: the missing profiles
+ *   are read from the accounts first, and a participant without settings (or with a class her category does not
+ *   allow any more) gets the default below — never a class of no category (audit K1 r3 #2). This preparation is
+ *   asynchronous: from the start-class until the class is built a second start-class is refused ('class-running'),
+ *   and when a profile cannot be read the start is refused ('class-not-ready') and nothing starts.
  * - Clock: on every join the room sends CLOCK_PING_COUNT 'clock-ping' { serverSent } messages (CLOCK_PING_EVERY_MS
  *   apart); the client answers 'clock-pong' { serverSent, clientTime }; rider commands carry clientTime and are
  *   translated with that session's ClockSync — until it is ready they are refused ('clock-not-ready').
@@ -70,9 +76,9 @@ export interface LobbyRoomDeps {
  *   same patch that says 'results': every rider of the heat finished or eliminated, with the faults of the results
  *   (time faults included), never the values of the tick before (audit K1 r2 #2). `riders` keeps them through the
  *   results phase; the next heat's 'riding' replaces them.
- * - Every `riders` entry and every 'class-table' row carries riderName and ponyName (profiles learnt at onAuth; a
- *   rider admitted over the directory who never connected is named from the accounts when her names land): a rider
- *   who leaves the room for good is no participant any more, and the client names her from these.
+ * - Every `riders` entry and every 'class-table' row carries riderName and ponyName (profiles learnt at onAuth, or
+ *   read from the accounts before the class is built for a rider admitted over the directory who never connected): a
+ *   rider who leaves the room for good is no participant any more, and the client names her from these.
  * - When a heat ends, every result is written with results.insertOnce; the class table is sent as 'class-table'
  *   { table } to everyone when the class is done, and to any client that joins while the class is already done.
  *   A client joining during a class gets 'class-course', then 'class-phase' for the phase in progress (with its
@@ -84,7 +90,9 @@ export interface LobbyRoomDeps {
  * Ids: the n-th class of a room is `${code}-${n}` (n from 1); its heats are rounds `${code}-${n}#${heatIndex}`.
  * Refusal codes sent as 'refused' { error }: 'not-riding' (a rider command outside 'riding' or from someone not
  * in the running heat), 'clock-not-ready', 'height-not-allowed' (not a class of the sender's pony category),
- * 'class-running' (start-class during a class), plus B1's 'host-only' / 'not-participant' / 'not-available'.
+ * 'class-running' (start-class during a class, or while the previous start-class is still being prepared),
+ * 'class-not-ready' (start-class while a participant's profile cannot be read; nothing starts, the host may try
+ * again), plus B1's 'host-only' / 'not-participant' / 'not-available'.
  * Defaults: a participant's height class is the lowest class allowed for their pony category; assists are off.
  */
 export const CLASS_PROTOCOL = {
@@ -291,6 +299,8 @@ export class LobbyRoom extends Room<{ state: LobbyState }> {
   /** Dropped riders whose seat is kept for a while (by account id). */
   private readonly reconnections = new Map<string, Reconnection>();
   private simulating = false;
+  /** True from a start-class until its class is built (the profiles are read in between): a second one is refused. */
+  private preparing = false;
 
   /** The code of the room this instance serves (set in onCreate; never taken from a joining client). */
   get code(): string {
@@ -360,9 +370,7 @@ export class LobbyRoom extends Room<{ state: LobbyState }> {
     if (!account) throw new Error('no-session: sign in first');
     if (!this.isAdmitted(account.id)) throw new Error('not-admitted: the host has not let this account in');
     this.profiles.set(account.id, { riderName: account.riderName, ponyName: account.ponyName, ponyCategory: account.ponyCategory });
-    if (!this.settings.has(account.id)) {
-      this.settings.set(account.id, { heightClass: allowedHeightClasses(account.ponyCategory)[0] ?? 60, assists: { schoolmaster: false, widerWindow: false } });
-    }
+    this.ensureSettings(account.id);
     this.generationBySession.set(client.sessionId, account.sessionGeneration);
     return { accountId: account.id };
   }
@@ -538,24 +546,35 @@ export class LobbyRoom extends Room<{ state: LobbyState }> {
   // ---------------------------------------------------------------------------------------------------------
   // Part B2: the class
 
-  private startClass(client: Client, actorId: string, order: 'random' | 'lowest-class-first'): void {
-    const entry = this.entry();
-    if (!entry) return;
-    if (this.flow && this.flow.phase !== 'done') {
+  private async startClass(client: Client, actorId: string, order: 'random' | 'lowest-class-first'): Promise<void> {
+    if (!this.entry()) return;
+    if (this.preparing || (this.flow && this.flow.phase !== 'done')) {
       client.send('refused', { error: 'class-running' });
+      return;
+    }
+    this.preparing = true;
+    let participants: string[] | null;
+    try {
+      participants = await this.prepareParticipants();
+    } finally {
+      this.preparing = false;
+    }
+    if (this.closing || !this.entry()) return;
+    if (participants === null) {
+      client.send('refused', { error: 'class-not-ready' });
       return;
     }
     this.classNumber += 1;
     this.classId = `${this.roomCode}-${this.classNumber}`;
     const deps = this.deps();
     const course = deps.course ? deps.course(this.roomCode, this.classNumber) : clubCourse(`${this.roomCode}|${this.classNumber}`, 8);
-    const riders = entry.admission.participants.map((accountId) => {
-      const own = this.settings.get(accountId) ?? { heightClass: 60 as HeightClass, assists: { schoolmaster: false, widerWindow: false } };
+    // The settings are frozen here: a change from now on applies to the next class.
+    const riders = participants.map((accountId) => {
+      const own = this.ensureSettings(accountId);
       return { riderId: accountId, heightClass: own.heightClass, assists: { ...own.assists } };
     });
     const timing = deps.timing ? { walkMs: deps.timing.walkMs, resultsMs: deps.timing.resultsMs } : CLASS_TIMING;
     this.flow = new ClassFlow({ classId: this.classId, course, riders, order, mode: 'ranked', seed: this.classId, timing });
-    this.learnProfiles(riders.map((r) => r.riderId).filter((id) => !this.profiles.has(id)));
     this.course = course;
     this.heatRiders = new Set();
     this.lastTable = null;
@@ -660,27 +679,53 @@ export class LobbyRoom extends Room<{ state: LobbyState }> {
   }
 
   /**
-   * A rider of the class who never opened a WebSocket (admitted over the directory: in the class like any admitted
-   * participant, on autopilot) is unknown to onAuth: her names are read from the accounts and filled into her rider
-   * entry when they land; the class table is built later, from the profiles known by then.
+   * The admitted participants of the class about to start, each with a known profile (audit K1 r3 #2). A participant
+   * who never opened a WebSocket (admitted over the directory: in the class like any admitted participant, on
+   * autopilot) is unknown to onAuth, so her profile — names and pony category, hence her default class — is read from
+   * the accounts before the class is built. The list is read again after every wait (a kick, a leave or an admission
+   * may land meanwhile) until every participant on it is known. Null when a profile cannot be read (storage trouble,
+   * or no such account): the class must not start with a rider of unknown category.
    */
-  private learnProfiles(accountIds: readonly string[]): void {
-    for (const accountId of accountIds) {
-      void this.deps()
-        .accounts.getPublicProfile(accountId)
-        .then(
-          (profile) => {
-            if (!profile || this.profiles.has(accountId)) return;
-            this.profiles.set(accountId, { riderName: profile.riderName, ponyName: profile.ponyName, ponyCategory: profile.ponyCategory });
-            const view = this.state.riders.get(accountId);
-            if (view) {
-              view.riderName = profile.riderName;
-              view.ponyName = profile.ponyName;
-            }
-          },
-          () => undefined, // storage trouble: the rider stays unnamed here; the next connection of hers brings the profile
-        );
+  private async prepareParticipants(): Promise<string[] | null> {
+    for (;;) {
+      const entry = this.entry();
+      if (!entry) return null;
+      const participants = [...entry.admission.participants];
+      const missing = participants.filter((id) => !this.profiles.has(id));
+      if (missing.length === 0) return participants;
+      const read = await Promise.allSettled(missing.map((id) => this.deps().accounts.getPublicProfile(id)));
+      for (const [index, outcome] of read.entries()) {
+        const accountId = missing[index];
+        if (accountId === undefined) continue;
+        if (outcome.status !== 'fulfilled' || outcome.value === null) return null;
+        // A connection that landed meanwhile brought a fresher profile (onAuth): keep that one.
+        if (!this.profiles.has(accountId)) {
+          const profile = outcome.value;
+          this.profiles.set(accountId, { riderName: profile.riderName, ponyName: profile.ponyName, ponyCategory: profile.ponyCategory });
+        }
+      }
     }
+  }
+
+  /**
+   * A participant's settings, valid for her pony category: kept as she set them while her category allows the class;
+   * otherwise (none yet, or a class her category no longer allows) the lowest class allowed for her category with
+   * the assists she had (off by default). Her profile must be known (onAuth, or prepareParticipants).
+   */
+  private ensureSettings(accountId: string): RiderSettings {
+    const category = this.profiles.get(accountId)?.ponyCategory;
+    const own = this.settings.get(accountId);
+    if (category === undefined) {
+      if (own) return own;
+      throw new Error(`no profile for ${accountId}: its pony category, hence its height class, is unknown`);
+    }
+    const allowed = allowedHeightClasses(category);
+    if (own && allowed.includes(own.heightClass)) return own;
+    const lowest = allowed[0];
+    if (lowest === undefined) throw new Error(`pony category ${category} allows no height class`);
+    const fixed: RiderSettings = { heightClass: lowest, assists: own ? own.assists : { schoolmaster: false, widerWindow: false } };
+    this.settings.set(accountId, fixed);
+    return fixed;
   }
 
   /** The class table with every row named (the table itself is pure; the room knows the names). */
@@ -828,23 +873,24 @@ export class LobbyRoom extends Room<{ state: LobbyState }> {
         break;
       }
       case 'start-class':
-        this.startClass(client, actorId, message.order);
+        void this.startClass(client, actorId, message.order);
         break;
       case 'emote':
         this.broadcast('emote', { from: actorId, emote: message.emote });
         break;
       case 'height': {
-        const category = this.profiles.get(actorId)?.ponyCategory ?? 'C';
-        if (!allowedHeightClasses(category).includes(message.heightClass)) {
+        // A connected sender: onAuth learnt her profile and gave her settings of her category.
+        const category = this.profiles.get(actorId)?.ponyCategory;
+        if (category === undefined || !allowedHeightClasses(category).includes(message.heightClass)) {
           client.send('refused', { error: 'height-not-allowed' });
           break;
         }
-        const own = this.settings.get(actorId) ?? { heightClass: message.heightClass, assists: { schoolmaster: false, widerWindow: false } };
+        const own = this.ensureSettings(actorId);
         this.settings.set(actorId, { ...own, heightClass: message.heightClass });
         break;
       }
       case 'assists': {
-        const own = this.settings.get(actorId) ?? { heightClass: 60 as HeightClass, assists: { schoolmaster: false, widerWindow: false } };
+        const own = this.ensureSettings(actorId);
         this.settings.set(actorId, { ...own, assists: { schoolmaster: message.schoolmaster, widerWindow: message.widerWindow } });
         break;
       }

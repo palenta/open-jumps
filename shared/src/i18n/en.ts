@@ -148,6 +148,7 @@ export const en = {
   'caption.refused.clock-not-ready': 'Clock not ready yet',
   'caption.refused.height-not-allowed': 'That height is not allowed for your pony',
   'caption.refused.class-running': 'The class is already running',
+  'caption.refused.class-not-ready': 'The class could not start yet — try again',
   'caption.refused.other': 'Not allowed: {error}',
 
   'pronoun.yegua': 'she',

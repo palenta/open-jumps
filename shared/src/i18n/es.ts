@@ -149,6 +149,7 @@ export const es: Record<keyof typeof en, string> = {
   'caption.refused.clock-not-ready': 'El reloj todavía no está listo',
   'caption.refused.height-not-allowed': 'Esa altura no está permitida para tu poni',
   'caption.refused.class-running': 'La prueba ya ha empezado',
+  'caption.refused.class-not-ready': 'La prueba todavía no puede empezar — inténtalo otra vez',
   'caption.refused.other': 'No permitido: {error}',
 
   'pronoun.yegua': 'ella',
