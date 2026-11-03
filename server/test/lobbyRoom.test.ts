@@ -71,11 +71,16 @@ async function untilTrue(check: () => boolean, attempts = 200): Promise<void> {
 const authContext = (headers: Record<string, string>): AuthContext => ({ ip: '127.0.0.1', headers: new Headers(headers) });
 
 /**
- * The first full state a joined client holds, as in classRoom.test.ts: joinById resolves on JOIN_ROOM, before ROOM_STATE
- * arrives, and room.waitForNextPatch() waits for the SERVER's next patch, not for this client — under load the client's
- * state could still be empty after it (audit K1 r5 #4).
+ * The client's OWN decoded state once `check` holds on it (polled for at most ~3 s; the error names `what`).
+ * room.waitForNextPatch() waits for the SERVER's next patch, not for this client to receive and decode it: under load
+ * the client's state can still be empty, or a patch behind, after it (audit K1 r5 #4, #5). A test that reads a client's
+ * state waits here instead.
  */
-async function firstState(client: { state: unknown }): Promise<Record<string, unknown>> {
+async function clientStateWhere(
+  client: { state: unknown },
+  check: (snapshot: Record<string, unknown>) => boolean,
+  what: string,
+): Promise<Record<string, unknown>> {
   for (let i = 0; i < 300; i += 1) {
     let snapshot: Record<string, unknown> | undefined;
     try {
@@ -83,11 +88,18 @@ async function firstState(client: { state: unknown }): Promise<Record<string, un
     } catch {
       snapshot = undefined;
     }
-    if (snapshot && typeof snapshot.code === 'string' && snapshot.code !== '') return snapshot;
+    if (snapshot && check(snapshot)) return snapshot;
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
-  throw new Error('no lobby state arrived within 3 s');
+  throw new Error(`${what} within 3 s`);
 }
+
+/**
+ * The first full state a joined client holds, as in classRoom.test.ts: joinById resolves on JOIN_ROOM, before ROOM_STATE
+ * arrives (audit K1 r5 #4).
+ */
+const firstState = (client: { state: unknown }) =>
+  clientStateWhere(client, (snapshot) => typeof snapshot.code === 'string' && snapshot.code !== '', 'no lobby state arrived');
 
 describe('signing in to the live room', () => {
   it('the cookie alone (no options.sessionToken) connects an admitted host; the received state has exactly the public fields', async () => {
@@ -232,7 +244,8 @@ describe('messages (rows 20, 21)', () => {
     const hostClient = await browser(host.token).joinById<LobbyState>(room.roomId, { code: entry.code });
     const waiting = await registerRider(services, uniqueRiderName('Waiting'));
     await services.rooms.requestJoin(entry.code, waiting.account.id);
-    await room.waitForNextPatch();
+    // The host client's own state, not the server's next patch (audit K1 r5 #5).
+    await clientStateWhere(hostClient, (snapshot) => snapshot.pendingCount === 1, "the host client's state did not show pendingCount 1");
     expect(hostClient.state.pendingCount).toBe(1);
     expect(JSON.stringify(hostClient.state.toJSON())).not.toContain(waiting.account.riderName);
     await hostClient.leave();
