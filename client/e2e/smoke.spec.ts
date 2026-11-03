@@ -90,10 +90,12 @@ async function tapAtFence(page: Page, fence: number, ponyName: string): Promise<
   await expect(tap).toHaveAttribute('data-armed', 'true', { timeout: 60_000 });
   const takeoffAt = Number.parseFloat((await tap.getAttribute('data-takeoff-at')) ?? 'NaN');
   expect(Number.isFinite(takeoffAt)).toBe(true);
-  const now = await page.evaluate(() => performance.now());
-  await page.waitForTimeout(Math.max(0, takeoffAt + 20 - now));
+  // The control's box is read before the wait, so that after it only the touch itself stands between the test and
+  // the take-off moment (every round trip to the browser costs real milliseconds of the ±157 ms clean window).
   const box = await tap.boundingBox();
   if (box === null) throw new Error('the tap control is not displayed');
+  const now = await page.evaluate(() => performance.now());
+  await page.waitForTimeout(Math.max(0, takeoffAt + 20 - now));
   await page.touchscreen.tap(box.x + box.width / 2, box.y + box.height / 2); // a finger, not a mouse: the project has touch
   await expect(page.locator('[data-hud-caption]')).toHaveText(new RegExp(`^${ponyName}: (perfecta|cero faltas) at fence ${String(fence)}`), { timeout: 10_000 });
   await expect(page.locator('[data-hud-fence]')).toHaveText(`Fence ${String(fence + 1)}`, { timeout: 10_000 });
@@ -156,8 +158,9 @@ test('create → code → ring → admit → heights → walk → round with a c
     await expect(pendingRow).toContainText(`${FRIEND_NAME} on Luna`, { timeout: 15_000 });
     await host.locator('[data-action="admit"]').first().click();
     await expectScreen(friend, 'lobby', 20_000);
-    await expect(friend.locator('[data-list="participants"] [data-id]')).toHaveCount(2, { timeout: 10_000 });
-    await expect(host.locator('[data-list="participants"] [data-id]')).toHaveCount(2, { timeout: 10_000 });
+    // One list item per participant (the host's rows also carry a kick button with its own data-id).
+    await expect(friend.locator('[data-list="participants"] > li[data-id]')).toHaveCount(2, { timeout: 10_000 });
+    await expect(host.locator('[data-list="participants"] > li[data-id]')).toHaveCount(2, { timeout: 10_000 });
 
     // Both ride the 70 cm class; the host starts.
     await host.locator('select[data-height]').selectOption('70');
