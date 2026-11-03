@@ -70,13 +70,31 @@ async function untilTrue(check: () => boolean, attempts = 200): Promise<void> {
 }
 const authContext = (headers: Record<string, string>): AuthContext => ({ ip: '127.0.0.1', headers: new Headers(headers) });
 
+/**
+ * The first full state a joined client holds, as in classRoom.test.ts: joinById resolves on JOIN_ROOM, before ROOM_STATE
+ * arrives, and room.waitForNextPatch() waits for the SERVER's next patch, not for this client — under load the client's
+ * state could still be empty after it (audit K1 r5 #4).
+ */
+async function firstState(client: { state: unknown }): Promise<Record<string, unknown>> {
+  for (let i = 0; i < 300; i += 1) {
+    let snapshot: Record<string, unknown> | undefined;
+    try {
+      snapshot = (client.state as { toJSON?: () => Record<string, unknown> } | undefined)?.toJSON?.();
+    } catch {
+      snapshot = undefined;
+    }
+    if (snapshot && typeof snapshot.code === 'string' && snapshot.code !== '') return snapshot;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error('no lobby state arrived within 3 s');
+}
+
 describe('signing in to the live room', () => {
   it('the cookie alone (no options.sessionToken) connects an admitted host; the received state has exactly the public fields', async () => {
     const { host, entry, room } = await openRoom();
     const client = await browser(host.token).joinById<LobbyState>(room.roomId, { code: entry.code });
-    await room.waitForNextPatch();
+    const state = await firstState(client); // the client's own first state, not the server's next patch
     expect(room.clients).toHaveLength(1);
-    const state = client.state.toJSON() as Record<string, unknown>;
     // B2 added the class fields (phase, heatIndex, roundClockMs, riders; nextHeat with audit K1 r3 #6); still no names
     // of those waiting at the door.
     expect(Object.keys(state).sort()).toEqual(['code', 'entryOpen', 'heatIndex', 'hostId', 'nextHeat', 'participants', 'pendingCount', 'phase', 'riders', 'roundClockMs']);
