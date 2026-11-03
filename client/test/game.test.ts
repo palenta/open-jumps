@@ -2657,7 +2657,11 @@ describe('the course map on the walk screen (K1.1 step 4)', () => {
     return h;
   }
 
-  const map = (h: Harness): Element => q(h.root, '[data-walk-map]');
+  const map = (h: Harness): Element => {
+    const element = h.root.querySelector('[data-walk-map]');
+    expect(element, 'the walk map [data-walk-map]').not.toBeNull();
+    return element as Element;
+  };
   const fenceMarkers = (h: Harness): string[] => [...map(h).querySelectorAll('[data-fence-marker]')].map((m) => m.getAttribute('data-fence-marker') ?? '');
   const turnMarkers = (h: Harness): string[] => [...map(h).querySelectorAll('[data-turn-marker]')].map((m) => m.getAttribute('data-turn-marker') ?? '');
   const focused = (h: Harness): string[] =>

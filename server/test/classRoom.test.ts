@@ -191,7 +191,7 @@ function inOrder(actual: { phase: string; heatIndex: number }[], expected: { pha
   return i === expected.length;
 }
 
-type ApproachEvent = { t0: number; fence: number; attempt: number };
+type ApproachEvent = { t0: number; fence: number; attempt: number; speedMps: number };
 type TakeoffEvent = { offsetMs: number | null; outcome: { kind: string; faults: number } };
 
 /** A room with `riderCount` admitted riders (the host first), riding `course`. */
@@ -860,7 +860,7 @@ describe('audit K1 r2 #1: a rider who takes control back is told the approach in
     expect(roundEvents(friendSeat, 'approach', friend.account.id)).toEqual([]); // the broadcast never reached her
     const back = reattach(await sdk(friend.token).reconnect<LobbyState>(token), friend, 1500);
     await until(() => approachSyncs(back).length > 0, 2000, 'approach-sync on the new connection');
-    expect(approachSyncs(back)).toEqual([{ classNumber: 1, heatIndex: 0, hardTurn: false, approach: { fence: approach.fence, attempt: approach.attempt, t0: approach.t0, speedMps: 5 } }]);
+    expect(approachSyncs(back)).toEqual([{ classNumber: 1, heatIndex: 0, hardTurn: false, approach: { fence: approach.fence, attempt: approach.attempt, t0: approach.t0, speedMps: approach.speedMps } }]);
     expect(approachSyncs(hostSeat)).toEqual([]);
     // The reconnected connection is measured again (the series goes to the NEW connection, not the stale one).
     await until(() => clockPings(back).length >= 3, 2000, 'a clock series on the new connection');
@@ -872,6 +872,8 @@ describe('audit K1 r2 #1: a rider who takes control back is told the approach in
     expect(takeoff.offsetMs).not.toBeNull(); // her tap, not "no tap" at the deadline
     expect(Math.abs(takeoff.offsetMs ?? 999)).toBeLessThan(120);
     expect(refusals(back)).toEqual([]);
+    // K1.1 step 5: the sync carries the approach's frozen speed (collected canter), the same as the broadcast.
+    expect(approachSyncs(back)[0]?.approach?.speedMps).toBe(5);
     await back.client.leave();
     await hostSeat.client.leave();
   }, 30000);
@@ -884,7 +886,7 @@ describe('audit K1 r2 #1: a rider who takes control back is told the approach in
     await until(() => approachSyncs(again).length > 0, 2000, 'approach-sync on the fresh connection');
     const order = again.received.map((m) => m.type).filter((type) => type === 'class-course' || type === 'class-phase' || type === 'approach-sync');
     expect(order).toEqual(['class-course', 'class-phase', 'approach-sync']);
-    expect(approachSyncs(again)).toEqual([{ classNumber: 1, heatIndex: 0, hardTurn: false, approach: { fence: approach.fence, attempt: approach.attempt, t0: approach.t0, speedMps: 5 } }]);
+    expect(approachSyncs(again)).toEqual([{ classNumber: 1, heatIndex: 0, hardTurn: false, approach: { fence: approach.fence, attempt: approach.attempt, t0: approach.t0, speedMps: approach.speedMps } }]);
     expect(approachSyncs(hostSeat)).toEqual([]);
     await until(() => clockPings(again).length >= 4, 2000, 'the fresh clock series'); // three answered pongs make it ready
     expect(approach.t0 - serverNow()).toBeGreaterThan(300);
@@ -894,6 +896,7 @@ describe('audit K1 r2 #1: a rider who takes control back is told the approach in
     expect(takeoff.offsetMs).not.toBeNull();
     expect(Math.abs(takeoff.offsetMs ?? 999)).toBeLessThan(120);
     expect(refusals(again)).toEqual([]);
+    expect(approachSyncs(again)[0]?.approach?.speedMps).toBe(5); // K1.1 step 5
     await again.client.leave();
     await hostSeat.client.leave();
   }, 30000);

@@ -44,7 +44,7 @@ describe('running and the approach', () => {
     const events = drive(r, 0, 3550);
     expect(r.snapshot()).toMatchObject({ positionM: 17.75, phase: 'running', t0: null });
     expect(events).toEqual([]);
-    expect(r.tick(3600)).toEqual([{ type: 'approach', fence: 1, attempt: 1, t0: 6000, speedMps: 5 }]);
+    expect(r.tick(3600)).toEqual([{ type: 'approach', fence: 1, attempt: 1, t0: 6000, speedMps: expect.any(Number) }]); // the value: K1.1 step 5 below
     expect(r.snapshot()).toMatchObject({ positionM: 18, phase: 'approach', t0: 6000 });
     expect(r.elapsedMs(3600)).toBe(3600);
   });
@@ -165,7 +165,7 @@ describe('taps and the decision moment (matrix row 3)', () => {
     drive(r, 0, 3550);
     expect(r.undecidedApproach()).toBeNull(); // not in the zone yet
     r.tick(3600);
-    expect(r.undecidedApproach()).toEqual({ fence: 1, attempt: 1, t0: 6000, speedMps: 5 });
+    expect(r.undecidedApproach()).toEqual({ fence: 1, attempt: 1, t0: 6000, speedMps: expect.any(Number) }); // the value: K1.1 step 5 below
     r.setLine('angle', 3700);
     drive(r, 3600, 6300);
     r.tap(tap(6300, 6350));
@@ -176,7 +176,7 @@ describe('taps and the decision moment (matrix row 3)', () => {
     r.setLine('center', 6400);
     const restart = driveUntil(r, 6350, (e) => e.type === 'restart');
     const retry = r.undecidedApproach();
-    expect(retry).toEqual({ fence: 1, attempt: 2, t0: expect.any(Number), speedMps: 5 });
+    expect(retry).toEqual({ fence: 1, attempt: 2, t0: expect.any(Number), speedMps: expect.any(Number) });
     const t0 = nextTick(retry?.t0 ?? 0);
     drive(r, restart.at, t0);
     r.tap(tap(t0, t0 + 10, 1, 2));
@@ -539,7 +539,7 @@ describe('schoolmaster, autopilot and withdrawal (matrix rows 8, 9)', () => {
     drive(r, 17600, 19950);
     expect(r.snapshot()).toMatchObject({ phase: 'waiting', positionM: 88 });
     r.reconnected(20000);
-    expect(r.tick(20000)).toEqual([{ type: 'autopilot', at: 20000, on: false }, { type: 'approach', fence: 3, attempt: 1, t0: 22400, speedMps: 5 }]);
+    expect(r.tick(20000)).toEqual([{ type: 'autopilot', at: 20000, on: false }, { type: 'approach', fence: 3, attempt: 1, t0: 22400, speedMps: expect.any(Number) }]);
     expect(r.snapshot()).toMatchObject({ autopilot: false, usedAutopilot: true, phase: 'approach' });
     r.tap(tap(22400, 22450, 3, 1));
     const finish = drive(r, 20000, 26400).find((e) => e.type === 'finish');
@@ -790,6 +790,15 @@ describe('the approach speed in the messages (K1.1 step 5: speedMps = Approach.s
     r.setLine('center', 6400);
     driveUntil(r, 6350, (e) => e.type === 'restart');
     expect(r.undecidedApproach()).toMatchObject({ fence: 1, attempt: 2, speedMps: 5 });
+  });
+
+  it('the approach a reconnection opens after the autopilot waited: collected, 5 m/s', () => {
+    const r = runner();
+    drive(r, 0, 1950);
+    r.disconnected(2000);
+    drive(r, 1950, 17600);
+    r.reconnected(20000);
+    expect(r.tick(20000)).toContainEqual({ type: 'approach', fence: 3, attempt: 1, t0: 22400, speedMps: 5 });
   });
 
   it('negative: between fences, in flight and stopped there is no undecided approach, so no speed either', () => {
