@@ -5,7 +5,11 @@ import { HeatSchedule } from '../rooms/heatSchedule.js';
 import { RoundEngine, type RiderCommand, type RoundEvent, type RoundResult, type RoundSnapshot } from './roundEngine.js';
 
 export const CLASS_TIMING = {
-  /** Course walk (reconocimiento): club tier 10 s, upper tiers 20 s. */
+  /**
+   * Course walk (reconocimiento): 20 s on every tier, the club tier included (K1.1 step 10, owner decision
+   * 2026-11-03: the map of the route needs the time; upper tiers 20 s as planned). K1.1 contract stage: still the K1
+   * club value of 10 s until the code stage.
+   */
   walkMs: 10_000,
   /** Results and fail reel between heats. */
   resultsMs: 15_000,

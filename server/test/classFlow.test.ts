@@ -72,8 +72,29 @@ describe('buildClassTable', () => {
 });
 
 describe('phases and heats', () => {
-  it('default timing is 10 s walk and 15 s results', () => {
-    expect(CLASS_TIMING).toEqual({ walkMs: 10_000, resultsMs: 15_000 });
+  it('default timing is a 20 s walk (K1.1 step 10: the club tier too) and 15 s results', () => {
+    expect(CLASS_TIMING).toEqual({ walkMs: 20_000, resultsMs: 15_000 });
+  });
+
+  it('without a timing of its own a class walks the course for CLASS_TIMING.walkMs = 20 s: still the walk at 19.95 s, riding at 20 s (K1.1 step 10)', () => {
+    const { timing: _shortened, ...withDefaults } = setup();
+    void _shortened;
+    const flow = new ClassFlow(withDefaults);
+    flow.start(0);
+    const events: ClassEvent[] = [];
+    drive(flow, 0, 19_950, [], events);
+    expect(flow.phase).toBe('walk');
+    expect(events.find((e): e is Extract<ClassEvent, { type: 'phase' }> => e.type === 'phase' && e.phase === 'walk')).toMatchObject({ at: 0, endsAt: 20_000 });
+    drive(flow, 19_950, 20_000, [], events);
+    expect(flow.phase).toBe('riding');
+    expect(phasesOf(events)).toEqual([['walk', 0, 0], ['riding', 0, 20_000]]);
+  });
+
+  it('negative: an explicit timing still wins over the default (the tests\' short walks are unchanged)', () => {
+    const flow = new ClassFlow(setup());
+    flow.start(0);
+    const events = drive(flow, 0, 1000);
+    expect(phasesOf(events)).toEqual([['walk', 0, 0], ['riding', 0, 1000]]);
   });
 
   it('walk → riding → results per heat, two heats for six riders, then done with one table and no lost or doubled rider', () => {
