@@ -33,7 +33,7 @@ const TAP_POINT = middleOf('tap');
 
 /** A scene that draws nothing and keeps every frame the game hands it (the take-off marker, the own horse). */
 function recordingScene(frames: SceneFrame[]): SceneLike {
-  return { mount: () => undefined, setCourse: () => undefined, render: (frame) => void frames.push(frame), dispose: () => undefined };
+  return { mount: () => undefined, setCourse: () => undefined, render: (frame) => void frames.push(frame), dispose: () => undefined, drawCalls: () => null };
 }
 const noWindow = { addEventListener: () => undefined, removeEventListener: () => undefined };
 

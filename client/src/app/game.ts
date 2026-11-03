@@ -72,6 +72,8 @@ export interface SceneLike {
   setCourse(course: CourseSpec | null): void;
   render(frame: SceneFrame): void;
   dispose(): void;
+  /** The draw calls of the last frame drawn (renderer.info.render.calls), null without WebGL — for the debug overlay (K1.1 step 9). */
+  drawCalls(): number | null;
 }
 
 /** The pieces of window the game listens to (resize, pageshow); sizes come from measuring the arena, never from here. */
@@ -115,6 +117,11 @@ export interface GameDeps {
   measure?: (element: HTMLElement) => ArenaRect;
   /** Timers for the lobby polling and the press feedback of the round screen (injectable for tests). */
   timers?: { setTimeout: (fn: () => void, ms: number) => unknown; clearTimeout: (handle: unknown) => void };
+  /**
+   * The debug overlay (K1.1 step 9): on only when the page address asks for it — main.ts passes
+   * debugRequested(location.search). Default false: nothing of it in the DOM.
+   */
+  debug?: boolean;
 }
 
 export interface Game {
@@ -175,6 +182,16 @@ export function pressTime(timeStamp: number, now: number): PressTime {
       throw new NotImplementedError('pressTime().reason (K1.1 step 2)');
     },
   };
+}
+
+/**
+ * Whether the page address asks for the debug overlay (K1.1 step 9): `search` is location.search; true exactly when
+ * its query has a parameter named `debug` — "?debug", "?debug=1", "?x=1&debug" — and false for anything else, a
+ * parameter that only contains the word ("?debugger", "?nodebug") included.
+ */
+export function debugRequested(search: string): boolean {
+  void search;
+  throw new NotImplementedError('debugRequested (K1.1 step 9)');
 }
 
 /** Everything the client keeps for one class: re-created at every class-course, so a new class starts clean. */
@@ -333,6 +350,26 @@ interface RoundModules {
  *   never an empty page). The next step is translate('results.nextHeat') only while the state's nextHeat says the
  *   server will ride another heat; the last heat's results and 'done' read translate('results.classDoneWaiting')
  *   (audit K1 r3 #6).
+ * - debug, K1.1 step 9 — only with deps.debug (main.ts: debugRequested(location.search)); otherwise no [data-debug]
+ *   anywhere. An overlay [data-debug] in the root above the game, on every screen (no account or PIN needed: it is
+ *   there from the sign-in on), kept across re-renders like the arena. It sends nothing to the server.
+ *   · [data-debug-press] rows: the five latest touches that hit a zone, the newest first (a sixth drops the oldest),
+ *     whatever the screen of the round, the class or the heat they came in. Each row carries: data-zone (the control),
+ *     data-time-stamp (the event's own timeStamp as received, String()), data-source and data-reason (pressTime; the
+ *     reason '' when null), data-client-time (pressTime().time), data-handled-at (clock.now() at handling),
+ *     data-outcome (the controller's outcome).
+ *   · A tap that went out also carries data-local-offset — clientTime − clock.toClient(t0) of its approach, kept at
+ *     the press — and data-judge, matched with the own horse's 'takeoff' (riderId = own) of the current class and
+ *     heat, the same fence and attempt: 'pending' until it arrives; 'accepted' when its offsetMs is within 20 ms of
+ *     the local estimate (|offsetMs − local| ≤ 20) and the own horse has neither schoolmaster (the round's frozen
+ *     assists) nor the autopilot (the state's autopilot, or the own 'autopilot' event) at the verdict; 'unconfirmed'
+ *     otherwise; 'no-tap' when its offsetMs is null. data-judge-offset is the judge's offsetMs ('' while pending or
+ *     for 'no-tap'). Another rider's 'takeoff' — also of the same fence and attempt — is never matched; a new class
+ *     or heat clears the matching: a tap of the old one is never matched to a verdict of the new (its row stays,
+ *     'pending').
+ *   · A turn that went out carries data-turn-quality: outcome.quality of the own 'turn' verdict ('' until it arrives).
+ *   · [data-debug-stats] below the rows: data-fps — the frames per second over the last second of frame(now) calls
+ *     (the count of frames in (now − 1000, now]) — and data-calls, scene.drawCalls() ('' when null).
  * - Lifecycle: document 'visibilitychange' (visible) and window 'pageshow' → session.resume(); window 'resize' →
  *   resize(). destroy() removes the listeners, leaves the session and disposes the scene.
  * - Names (captions, the labels over the horses, the heat screen, the class table) come from the state's
@@ -341,6 +378,8 @@ interface RoundModules {
  *   state carries none), others read as 'yegua'.
  */
 export function createGame(deps: GameDeps): Game {
+  // K1.1 contract stage: the debug overlay of step 9 is not built yet; a game asked for it says so at once.
+  if (deps.debug === true) throw new NotImplementedError('the debug overlay (K1.1 step 9)');
   const doc = deps.document;
   const root = deps.root;
   const measure = deps.measure ?? ((element: HTMLElement): ArenaRect => element.getBoundingClientRect());

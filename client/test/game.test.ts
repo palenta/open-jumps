@@ -8,6 +8,7 @@ import { caption as captionOf, clubCourse, isMessageKey, PACKET, translateKey, t
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   createGame,
+  debugRequested,
   pressTime,
   type ApiLike,
   type ArenaRect,
@@ -277,6 +278,13 @@ class FakeScene implements SceneLike {
 
   dispose(): void {
     this.disposed += 1;
+  }
+
+  /** What drawCalls() answers (the debug overlay's line of K1.1 step 9). */
+  calls: number | null = null;
+
+  drawCalls(): number | null {
+    return this.calls;
   }
 }
 
@@ -562,6 +570,8 @@ interface BootOptions {
   stateOnConnect?: LobbyStateSnapshot;
   /** The clock the game reads instead of the harness's ready test clock (e.g. a real ClientClock fed with pings). */
   clock?: ClockLike;
+  /** The debug overlay of K1.1 step 9 (the page address with ?debug). */
+  debug?: boolean;
 }
 
 /** Every game built in this file is destroyed and its root removed after the test. */
@@ -605,6 +615,7 @@ async function boot(options: BootOptions = {}): Promise<Harness> {
     locale: 'en',
     measure: () => ({ ...arena }),
     timers,
+    ...(options.debug !== undefined ? { debug: options.debug } : {}),
   });
   games.push(game);
   await settle();
@@ -728,9 +739,10 @@ async function ring(h: Harness, code: string): Promise<void> {
 }
 
 /** Signed in on home → the host creates room ABCDEF and is in its lobby with a connected session. */
-async function hostInLobby(script: Script = {}, stateOnConnect: LobbyStateSnapshot = snapshot(), clock?: ClockLike): Promise<Harness> {
+async function hostInLobby(script: Script = {}, stateOnConnect: LobbyStateSnapshot = snapshot(), clock?: ClockLike, debug?: boolean): Promise<Harness> {
   const h = await boot({
     ...(clock ? { clock } : {}),
+    ...(debug !== undefined ? { debug } : {}),
     script: {
       createRoom: [ok({ code: 'ABCDEF', roomId: 'r1' })],
       lobby: [ok(view()), ok(view()), ok(view()), ok(view()), ok(view())],
@@ -2943,5 +2955,194 @@ describe('the own horse on the approach: one visible position, the camera with i
     patch(h, 12);
     h.session().emitMessage(roundEvent({ type: 'approach', riderId: 'ana', fence: 1, attempt: 1, t0: h.clock.now() + 500, speedMps: 5 }));
     expectOwn(h, 12, 'patch');
+  });
+});
+
+describe('debugRequested: the page address asks for the debug overlay (K1.1 step 9)', () => {
+  it('a parameter named debug, alone, with a value or among others', () => {
+    for (const search of ['?debug', '?debug=1', '?debug=', '?x=1&debug', '?debug&x=1']) expect(debugRequested(search), search).toBe(true);
+  });
+
+  it('negative: no query, other parameters, or a parameter that only contains the word', () => {
+    for (const search of ['', '?', '?x=1', '?debugger', '?nodebug', '?x=debug']) expect(debugRequested(search), search).toBe(false);
+  });
+});
+
+describe('the debug overlay (K1.1 step 9)', () => {
+  /** The host riding heat 1 of class 1 with the overlay on. */
+  async function debugRound(schoolmaster = false): Promise<Harness> {
+    const h = await hostInLobby({}, snapshot(), undefined, true);
+    if (schoolmaster) setChecked(h.root, '[data-assist="schoolmaster"]', true);
+    startClass(h);
+    await settle();
+    expect(h.root.dataset.screen).toBe('round');
+    return h;
+  }
+  const rows = (h: Harness): HTMLElement[] => [...h.root.querySelectorAll<HTMLElement>('[data-debug] [data-debug-press]')];
+  const newest = (h: Harness): HTMLElement => {
+    const row = rows(h)[0];
+    if (row === undefined) throw new Error('no press row in the overlay');
+    return row;
+  };
+  const takeoffOwn = (h: Harness, offsetMs: number | null, riderId = 'host', attempt = 1): void =>
+    h.session().emitMessage(roundEvent({ type: 'takeoff', riderId, fence: 1, attempt, decidedAt: h.clock.now(), offsetMs, outcome: clean, approach: approach70 }));
+
+  it('without the flag there is no [data-debug] anywhere — sign-in, lobby, round', async () => {
+    const h = await inRound();
+    expect(h.root.querySelector('[data-debug]')).toBeNull();
+    expect(document.querySelector('[data-debug]')).toBeNull();
+  });
+
+  it('with the flag the overlay is there from the sign-in on: no account or PIN needed', async () => {
+    const h = await boot({ debug: true, script: { me: [failed(401, 'unauthenticated')] } });
+    expect(h.root.dataset.screen).toBe('signin');
+    expect(h.root.querySelector('[data-debug]')).not.toBeNull();
+  });
+
+  it('a tap that went out: every field of the press, the local offset at the press, then the judge\'s offset — accepted within 20 ms', async () => {
+    const h = await debugRound();
+    const t0 = h.clock.now() + 1_000;
+    approachOwn(h, 1, 1, t0, 5);
+    h.clock.t = t0 + 40;
+    press(h, TAP, t0 + 30);
+    const row = newest(h);
+    expect(row.dataset).toMatchObject({
+      zone: 'tap',
+      timeStamp: String(t0 + 30),
+      source: 'event',
+      reason: '',
+      clientTime: String(t0 + 30),
+      handledAt: String(t0 + 40),
+      outcome: 'sent',
+      localOffset: '30',
+      judge: 'pending',
+    });
+    takeoffOwn(h, 45); // 15 ms from the local estimate
+    expect(newest(h).dataset).toMatchObject({ judge: 'accepted', judgeOffset: '45', localOffset: '30' });
+  });
+
+  it("a difference of more than 20 ms is 'unconfirmed' with both numbers; exactly 20 ms is still accepted", async () => {
+    const off = await debugRound();
+    const t0 = off.clock.now() + 1_000;
+    approachOwn(off, 1, 1, t0, 5);
+    off.clock.t = t0 + 10;
+    press(off, TAP, t0);
+    takeoffOwn(off, 21);
+    expect(newest(off).dataset).toMatchObject({ judge: 'unconfirmed', judgeOffset: '21', localOffset: '0' });
+    off.game.destroy();
+    const edge = await debugRound();
+    const t1 = edge.clock.now() + 1_000;
+    approachOwn(edge, 1, 1, t1, 5);
+    edge.clock.t = t1 + 10;
+    press(edge, TAP, t1);
+    takeoffOwn(edge, 20);
+    expect(newest(edge).dataset.judge).toBe('accepted');
+  });
+
+  it("a tap too old for the judge: outcome 'too-old', nothing to match", async () => {
+    const h = await debugRound();
+    const t0 = h.clock.now() + 1_000;
+    approachOwn(h, 1, 1, t0, 5);
+    h.clock.t = t0 + 20;
+    press(h, TAP, h.clock.now() - PACKET.maxAgeMs - 1);
+    expect(newest(h).dataset).toMatchObject({ zone: 'tap', outcome: 'too-old', source: 'event', reason: '' });
+    expect(h.session().sentOf('tap')).toEqual([]);
+  });
+
+  it("a stamp from the future: source 'fallback', reason 'later-than-now', the moment is the clock at handling", async () => {
+    const h = await debugRound();
+    const now = h.clock.now();
+    press(h, GEAR, now + 50);
+    expect(newest(h).dataset).toMatchObject({ zone: 'gear', timeStamp: String(now + 50), source: 'fallback', reason: 'later-than-now', clientTime: String(now), handledAt: String(now), outcome: 'sent' });
+  });
+
+  it("locally sent, but the judge saw no tap (offsetMs null): 'no-tap'", async () => {
+    const h = await debugRound();
+    const t0 = h.clock.now() + 1_000;
+    approachOwn(h, 1, 1, t0, 5);
+    h.clock.t = t0 + 10;
+    press(h, TAP, t0);
+    takeoffOwn(h, null);
+    expect(newest(h).dataset).toMatchObject({ judge: 'no-tap', judgeOffset: '' });
+  });
+
+  it("negative: another rider's take-off of the same fence and attempt is never matched", async () => {
+    const h = await debugRound();
+    const t0 = h.clock.now() + 1_000;
+    approachOwn(h, 1, 1, t0, 5);
+    h.clock.t = t0 + 10;
+    press(h, TAP, t0);
+    takeoffOwn(h, 0, 'ana');
+    expect(newest(h).dataset.judge).toBe('pending');
+  });
+
+  it("an automatic decision after a local 'sent' is not her tap: 'unconfirmed' under schoolmaster, and with the autopilot on", async () => {
+    const school = await debugRound(true);
+    const t0 = school.clock.now() + 1_000;
+    approachOwn(school, 1, 1, t0, 5);
+    school.clock.t = t0 + 10;
+    press(school, TAP, t0);
+    takeoffOwn(school, 5); // the schoolmaster's own take-off, close to her finger by chance
+    expect(newest(school).dataset.judge).toBe('unconfirmed');
+    school.game.destroy();
+    const auto = await debugRound();
+    const t1 = auto.clock.now() + 1_000;
+    approachOwn(auto, 1, 1, t1, 5);
+    auto.clock.t = t1 + 10;
+    press(auto, TAP, t1);
+    auto.session().emitMessage(roundEvent({ type: 'autopilot', riderId: 'host', at: auto.clock.now(), on: true }));
+    auto.session().emitState(ridingState({ riders: { host: rider('host', { autopilot: true }), ana: rider('ana') } }));
+    takeoffOwn(auto, 5);
+    expect(newest(auto).dataset.judge).toBe('unconfirmed');
+  });
+
+  it('a new class clears the matching: a tap of class 1 is never matched to a verdict of class 2', async () => {
+    const h = await debugRound();
+    const t0 = h.clock.now() + 1_000;
+    approachOwn(h, 1, 1, t0, 5);
+    h.clock.t = t0 + 10;
+    press(h, TAP, t0);
+    await inResults(h);
+    startClass(h, 2);
+    await settle();
+    takeoffOwn(h, 0);
+    const tapRow = rows(h).find((row) => row.dataset.zone === 'tap');
+    expect(tapRow?.dataset.judge).toBe('pending');
+  });
+
+  it('a turn that went out shows the quality of the own turn verdict', async () => {
+    const h = await debugRound();
+    turnAheadOwn(h);
+    h.clock.t += 400;
+    press(h, TURN_LEFT);
+    expect(newest(h).dataset).toMatchObject({ zone: 'turn-left', outcome: 'sent', turnQuality: '' });
+    turnVerdict(h, 'host', 'wide');
+    expect(newest(h).dataset.turnQuality).toBe('wide');
+  });
+
+  it('the five latest presses, the newest first', async () => {
+    const h = await debugRound();
+    for (let i = 0; i < 6; i += 1) {
+      h.clock.t += 100;
+      press(h, GEAR);
+    }
+    expect(rows(h).map((row) => row.dataset.clientTime)).toEqual([10_600, 10_500, 10_400, 10_300, 10_200].map(String));
+  });
+
+  it('the line under the presses: FPS over the last second of frames and the draw calls of the scene', async () => {
+    const h = await debugRound();
+    h.scene.calls = 7;
+    for (let i = 0; i <= 50; i += 1) h.game.frame(h.clock.now() + i * 20);
+    const stats = q(h.root, '[data-debug] [data-debug-stats]');
+    expect(Math.abs(Number(stats.dataset.fps) - 50)).toBeLessThanOrEqual(1);
+    expect(stats.dataset.calls).toBe('7');
+  });
+
+  it('negative: the overlay sends nothing — the session hears only the gameplay messages', async () => {
+    const h = await debugRound();
+    press(h, GEAR);
+    press(h, TURN_LEFT);
+    h.game.frame(h.clock.now());
+    expect(h.session().sent.map((m) => m.type)).toEqual(['gear', 'line']);
   });
 });

@@ -321,6 +321,10 @@ export function createArenaScene(): ArenaScene {
       throw new NotImplementedError('the arena take-off markers (K1.1 step 7)');
     },
 
+    drawCalls(): number | null {
+      throw new NotImplementedError('the arena draw-call count for the debug overlay (K1.1 step 9)');
+    },
+
     dispose(): void {
       clearHorses();
       clearCourse();
