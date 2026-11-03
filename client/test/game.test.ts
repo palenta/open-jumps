@@ -111,6 +111,9 @@ const done: ApiResult<void> = { ok: true, value: undefined };
 
 // ---- the scripted room session ----------------------------------------------------------------------------
 
+/** How the next session's connect() behaves: resolves with the state, rejects (the room refused the WebSocket), or waits for release(). */
+type ConnectMode = 'ok' | 'fail' | 'hold';
+
 /** A room session driven by the test: connect() installs the first full state; the test emits later states, messages and status changes. */
 class FakeSession implements SessionLike {
   status: SessionStatus = 'idle';
@@ -129,16 +132,49 @@ class FakeSession implements SessionLike {
   private readonly stateListeners = new Set<(state: LobbyStateSnapshot) => void>();
   private readonly messageListeners = new Set<(message: ServerMessage) => void>();
   private readonly statusListeners = new Set<(status: SessionStatus) => void>();
+  /** A held connect(), settled by release(). */
+  private held: { resolve: () => void; reject: (error: unknown) => void } | null = null;
 
-  constructor(private readonly stateOnConnect: LobbyStateSnapshot) {}
+  constructor(
+    private readonly stateOnConnect: LobbyStateSnapshot,
+    private readonly connectMode: ConnectMode = 'ok',
+  ) {}
 
   connect(roomId: string, code: string): Promise<void> {
     this.connects.push([roomId, code]);
+    if (this.connectMode === 'fail') {
+      this.status = 'idle';
+      return Promise.reject(new Error('the room refused the WebSocket'));
+    }
+    if (this.connectMode === 'hold') {
+      return new Promise<void>((resolve, reject) => {
+        this.held = {
+          resolve: () => {
+            this.installState();
+            resolve();
+          },
+          reject,
+        };
+      });
+    }
+    this.installState();
+    return Promise.resolve();
+  }
+
+  /** Settles a held connect(): connected with the state, or rejected with `error`. */
+  release(error?: unknown): void {
+    const held = this.held;
+    if (held === null) throw new Error('no connect() is held');
+    this.held = null;
+    if (error === undefined) held.resolve();
+    else held.reject(error);
+  }
+
+  private installState(): void {
     this.reconnectionToken = `token-${String(this.connects.length)}`;
     this.state = this.stateOnConnect;
     this.emitStatus('connected');
     this.emitState(this.stateOnConnect);
-    return Promise.resolve();
   }
 
   resume(): Promise<boolean> {
@@ -454,8 +490,8 @@ interface Harness {
   timers: ManualTimers;
   /** The measured arena rectangle (viewport coordinates); the test moves and resizes it. */
   arena: ArenaRect;
-  /** The state the next connect() installs. */
-  settings: { stateOnConnect: LobbyStateSnapshot };
+  /** The state the next connect() installs and how the next session's connect() behaves. */
+  settings: { stateOnConnect: LobbyStateSnapshot; connect: ConnectMode };
   /** The latest session. */
   session(): FakeSession;
 }
@@ -486,7 +522,7 @@ async function boot(options: BootOptions = {}): Promise<Harness> {
   const win = new FakeWindow();
   const clock = testClock();
   const timers = new ManualTimers();
-  const settings = { stateOnConnect: options.stateOnConnect ?? snapshot() };
+  const settings: Harness['settings'] = { stateOnConnect: options.stateOnConnect ?? snapshot(), connect: 'ok' };
   /** An iPhone 16e in landscape with nothing in the way: the arena fills the viewport. */
   const arena: ArenaRect = { left: 0, top: 0, width: 844, height: 390 };
   const root = document.createElement('div');
@@ -497,7 +533,7 @@ async function boot(options: BootOptions = {}): Promise<Harness> {
     root,
     api: api.api,
     session: () => {
-      const session = new FakeSession(settings.stateOnConnect);
+      const session = new FakeSession(settings.stateOnConnect, settings.connect);
       sessions.push(session);
       return session;
     },
@@ -926,6 +962,107 @@ describe('the lobby as the host', () => {
     expect(h.session().leaves).toBe(1);
     expect(h.root.dataset.screen).toBe('home');
     expect(h.game.session).toBeNull();
+  });
+});
+
+describe('the room refuses the WebSocket after the HTTP admission (audit K1 r1 #3)', () => {
+  it('joinById rejects: the waiting lobby gives way to home with the network error and a retry button; the session is gone', async () => {
+    const h = await boot({
+      script: { knock: [ok<JoinDecision>({ status: 'admitted' })], roomStatus: [ok<RoomStatusReply>({ status: 'admitted', roomId: 'r1' })] },
+      stateOnConnect: guestSnapshot(),
+    });
+    h.settings.connect = 'fail';
+    await ring(h, 'ABCDEF');
+    expect(h.sessions).toHaveLength(1);
+    expect(h.root.dataset.screen).toBe('home');
+    expect(h.game.screen).toBe('home');
+    expect(h.game.session).toBeNull();
+    expect(text(h.root.querySelector('[data-status]'))).toBe('No connection to the server');
+    expect(text(h.root.querySelector('[data-action="retry"]'))).toBe('Try again');
+    expect(h.timers.pending).toEqual([]);
+  });
+
+  it('retry rings the same code again and the new session connects into the lobby; the failed session is left alone', async () => {
+    const h = await boot({
+      script: {
+        knock: [ok<JoinDecision>({ status: 'admitted' }), ok<JoinDecision>({ status: 'rejected', reason: 'already-in' })],
+        roomStatus: [ok<RoomStatusReply>({ status: 'admitted', roomId: 'r1' }), ok<RoomStatusReply>({ status: 'admitted', roomId: 'r1' })],
+      },
+      stateOnConnect: guestSnapshot(),
+    });
+    h.settings.connect = 'fail';
+    await ring(h, 'ABCDEF');
+    expect(h.root.dataset.screen).toBe('home');
+    h.settings.connect = 'ok';
+    click(h.root, '[data-action="retry"]');
+    await settle();
+    expect(h.api.callsOf('knock')).toEqual([['ABCDEF'], ['ABCDEF']]);
+    expect(h.sessions).toHaveLength(2);
+    expect(h.sessions[1]?.connects).toEqual([['r1', 'ABCDEF']]);
+    expect(h.game.session).toBe(h.sessions[1]);
+    expect(h.root.dataset.screen).toBe('lobby');
+    expect(text(h.root.querySelector('[data-code]'))).toBe('ABCDEF');
+    expect(h.sessions[0]?.leaves).toBe(0); // nothing to leave: it never connected
+    expect(h.root.querySelector('[data-action="retry"]')).toBeNull();
+  });
+
+  it('a late word from the failed attempt changes nothing: its status, state and end are ignored once a new session is in', async () => {
+    const h = await boot({
+      script: {
+        knock: [ok<JoinDecision>({ status: 'admitted' }), ok<JoinDecision>({ status: 'admitted' })],
+        roomStatus: [ok<RoomStatusReply>({ status: 'admitted', roomId: 'r1' }), ok<RoomStatusReply>({ status: 'admitted', roomId: 'r1' })],
+      },
+      stateOnConnect: guestSnapshot(),
+    });
+    h.settings.connect = 'hold';
+    await ring(h, 'ABCDEF');
+    expect(h.root.dataset.screen).toBe('lobby'); // waiting for the WebSocket
+    expect(text(h.root.querySelector('[data-status]'))).toBe('Waiting for the host to let you in…');
+    const first = h.session();
+    first.release(new Error('the room refused the WebSocket'));
+    await settle();
+    expect(h.root.dataset.screen).toBe('home');
+    h.settings.connect = 'ok';
+    click(h.root, '[data-action="retry"]');
+    await settle();
+    expect(h.root.dataset.screen).toBe('lobby');
+    expect(h.game.session).toBe(h.sessions[1]);
+    // The old attempt speaks up late: nothing on the screen moves.
+    first.emitStatus('connected');
+    first.emitState(guestSnapshot({ phase: 'riding', heatIndex: 0 }));
+    first.endWith({ kind: 'lost', code: 1006 });
+    await settle();
+    expect(h.root.dataset.screen).toBe('lobby');
+    expect(h.root.querySelector('[data-ended]')).toBeNull();
+    expect(h.game.session).toBe(h.sessions[1]);
+  });
+
+  it('a connect() that resolves after a newer session took over is left again at once, so no zombie connection stays in the room', async () => {
+    const h = await boot({
+      script: {
+        knock: [ok<JoinDecision>({ status: 'admitted' }), ok<JoinDecision>({ status: 'admitted' })],
+        roomStatus: [ok<RoomStatusReply>({ status: 'admitted', roomId: 'r1' }), ok<RoomStatusReply>({ status: 'admitted', roomId: 'r1' })],
+      },
+      stateOnConnect: guestSnapshot(),
+    });
+    h.settings.connect = 'hold';
+    await ring(h, 'ABCDEF');
+    const first = h.session();
+    // The rider gives up on the slow room and rings again from home (the leave button of the waiting lobby).
+    click(h.root, '[data-action="leave"]');
+    await settle();
+    expect(h.root.dataset.screen).toBe('home');
+    h.settings.connect = 'ok';
+    await ring(h, 'ABCDEF');
+    expect(h.root.dataset.screen).toBe('lobby');
+    expect(h.game.session).toBe(h.sessions[1]);
+    // Leaving while it was still connecting is a no-op on a real session (no room yet): the late connect must leave again.
+    const leavesBefore = first.leaves;
+    first.release();
+    await settle();
+    expect(first.leaves).toBe(leavesBefore + 1);
+    expect(h.game.session).toBe(h.sessions[1]);
+    expect(h.root.dataset.screen).toBe('lobby');
   });
 });
 

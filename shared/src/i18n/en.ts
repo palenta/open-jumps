@@ -69,6 +69,7 @@ export const en = {
   'lobby.you': 'you',
   'lobby.again': 'Again!',
   'lobby.leave': 'Leave the room',
+  'lobby.retry': 'Try again',
   'lobby.ended.kicked': 'You were asked to leave this room',
   'lobby.ended.revoked': 'You were signed out on this device',
   'lobby.ended.lost': 'Connection lost — tap to reconnect',

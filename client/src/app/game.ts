@@ -137,9 +137,11 @@ interface RoundModules {
  *   in [data-error]; success → home. On start the game asks api.me(): signed in → home, else signin.
  * - home: [data-hello] "Rider on Pony"; [data-action="create-room"] → LobbyFlow.create → connect → lobby;
  *   form[data-form="ring"] with [name="code"] → LobbyFlow.enter: while the host decides the screen is 'lobby'
- *   (screenFor with room 'joining') with [data-code] and [data-status] = translate('lobby.waiting'); once ready →
- *   connect; a refusal returns to home with translate('lobby.refused.<reason>') in [data-status];
- *   [data-action="logout"] → api.logout → signin.
+ *   (screenFor with room 'joining') with [data-code] and [data-status] = translate('lobby.waiting') and a
+ *   [data-action="leave"] that gives up; once ready → connect; a refusal returns to home with
+ *   translate('lobby.refused.<reason>') in [data-status]; a WebSocket refused after the admission returns to home
+ *   with translate('lobby.refused.network') and [data-action="retry"], which rings the same code again (audit K1
+ *   r1 #3); [data-action="logout"] → api.logout → signin.
  * - lobby: [data-code]; [data-list="participants"] > [data-id]; for the host [data-list="pending"] > [data-id] with
  *   [data-action="admit"|"deny"][data-id] and [data-list="kicked"] with [data-action="unblock"][data-id] (the host's
  *   LobbyView is fetched on entry, after every door action and whenever the state's pendingCount changes — a
@@ -194,6 +196,8 @@ export function createGame(deps: GameDeps): Game {
   let joining = false;
   /** A refusal or an error shown on the home screen. */
   let homeStatus = '';
+  /** The code to ring again after the room refused the WebSocket (home shows a retry button while set). */
+  let retryCode = '';
   let signinError = '';
   let view: LobbyView | null = null;
   let viewPendingCount = -1;
@@ -399,17 +403,25 @@ export function createGame(deps: GameDeps): Game {
     try {
       await next.connect(id, code);
     } catch {
+      // The room refused the WebSocket after the HTTP admission (audit K1 r1 #3): the doorbell flow is over, the
+      // failed session is dropped and home shows the error with a retry of the same code — never an endless wait.
       if (session === next) {
         dropSession();
+        stopJoining();
+        retryCode = code;
         homeStatus = t('lobby.refused.network');
+        render();
       }
-      render();
       return;
     }
-    if (session !== next) return;
-    joining = false;
-    flow?.stop();
-    flow = null;
+    if (session !== next) {
+      // A newer session took over while this one was still connecting (the rider left or rang again): this late
+      // connection must not linger in the room as a second, silent seat.
+      void next.leave();
+      return;
+    }
+    stopJoining();
+    retryCode = '';
     const current = next.state;
     if (current) onRoundState(current);
     render();
@@ -459,6 +471,8 @@ export function createGame(deps: GameDeps): Game {
 
   async function leaveRoom(): Promise<void> {
     const current = session;
+    stopJoining();
+    retryCode = '';
     if (current) {
       try {
         await current.leave();
@@ -468,6 +482,13 @@ export function createGame(deps: GameDeps): Game {
     }
     dropSession();
     render();
+  }
+
+  /** The doorbell is over (connected, failed, or given up): no more polls, no more 'joining' screen. */
+  function stopJoining(): void {
+    joining = false;
+    flow?.stop();
+    flow = null;
   }
 
   async function reconnectAfterLoss(): Promise<void> {
@@ -614,6 +635,7 @@ export function createGame(deps: GameDeps): Game {
         <button type="submit">${escapeHtml(t('home.join'))}</button>
       </form>
       <p data-status class="status">${escapeHtml(homeStatus)}</p>
+      ${retryCode !== '' ? `<button type="button" data-action="retry" class="primary">${escapeHtml(t('lobby.retry'))}</button>` : ''}
       <button type="button" data-action="logout" class="link">${escapeHtml(t('home.logout'))}</button>
     </section>`;
   }
@@ -633,6 +655,7 @@ export function createGame(deps: GameDeps): Game {
         <h1>${escapeHtml(t('lobby.title', { code: roomCode }))}</h1>
         <p class="code" data-code>${escapeHtml(roomCode)}</p>
         <p data-status class="status">${escapeHtml(t('lobby.waiting'))}</p>
+        <button type="button" data-action="leave" class="link">${escapeHtml(t('lobby.leave'))}</button>
         ${localeButtons()}
       </section>`;
     }
@@ -826,6 +849,7 @@ export function createGame(deps: GameDeps): Game {
       render();
     } else if (kind === 'ring') {
       homeStatus = '';
+      retryCode = '';
       const code = fieldValue(form, 'code');
       void newFlow().enter(code);
       render();
@@ -854,8 +878,17 @@ export function createGame(deps: GameDeps): Game {
       }
       case 'create-room':
         homeStatus = '';
+        retryCode = '';
         void newFlow().create();
         break;
+      case 'retry': {
+        const code = retryCode;
+        homeStatus = '';
+        retryCode = '';
+        void newFlow().enter(code);
+        render();
+        break;
+      }
       case 'logout':
         await deps.api.logout();
         dropSession();
