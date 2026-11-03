@@ -19,6 +19,7 @@ import { ROOM_CAPACITY } from '../rooms/admission.js';
 import { RIDER_ONLY_MESSAGES, authorizeRoomMessage, validateRoomMessage, type RoomMessage } from '../rooms/authz.js';
 import { ClassFlow, CLASS_TIMING, type ClassEvent, type ClassTable, type ClassTableRow } from '../round/classFlow.js';
 import { ClockSync } from '../round/clockSync.js';
+import { SYSTEM_TIME, composeGameClock, type TimeSources } from '../round/gameClock.js';
 import { OUTBOX, ResultOutbox } from '../round/resultOutbox.js';
 import { RUN } from '../round/courseRunner.js';
 import type { RoundResult, RoundSnapshot } from '../round/roundEngine.js';
@@ -34,8 +35,17 @@ export interface LobbyRoomDeps {
   course?: (code: string, classNumber: number) => CourseSpec;
   /** Part B2: course-walk and results durations and the reconnection window; defaults CLASS_TIMING / CLASS_PROTOCOL. */
   timing?: { walkMs: number; resultsMs: number; reconnectSeconds?: number };
-  /** Part B2: the server clock in ms for the class and the clock sync (tests advance it); defaults to Date.now. */
+  /**
+   * Test hook: the game clock itself — already whole milliseconds that never go back (a test moves it by hand). Left
+   * out (production), the game clock is composed from `time` (audit K1 r5 #1, see gameClock.ts).
+   */
   clock?: () => number;
+  /**
+   * The server's time sources (audit K1 r5 #1): unless `clock` is given, the game clock is composed from them — the
+   * wall read once at configure plus the monotonic time elapsed since — and the calendar date of a result (recordedAt)
+   * is always read from `wall`. Defaults to SYSTEM_TIME (Date.now, performance.now).
+   */
+  time?: TimeSources;
 }
 
 /**
@@ -103,7 +113,15 @@ export interface LobbyRoomDeps {
  *   { table } to everyone when the class is done, and to any client that joins while the class is already done.
  *   A client joining during a class gets 'class-course', then 'class-phase' for the phase in progress (with its
  *   startedAt / endsAt), then — once done — 'class-table'.
- * - The class is ticked from one `now` per tick (deps.clock) for every rider; the live room keeps ticking with
+ * - Time (audit K1 r5 #1): every game time of the room is read from ONE game clock that never goes back — the
+ *   simulation tick, the class phases (and the startedAt / endsAt they announce), the receive time of a command, a
+ *   rider's disconnection, reconnection and leave, the clock pings (serverSent) and pongs (serverReceived), and the
+ *   retry interval of the result outbox. In production it is composed at configure from deps.time (the wall read once
+ *   plus the monotonic time elapsed since, gameClock.ts), so a step of the system's calendar clock — back or forward,
+ *   NTP or settimeofday — never reaches the game: no tick goes backwards, no walk ends early, no heat ends on a time
+ *   limit, no command is stamped in the past and no clock sample is biased. The calendar date of a result
+ *   (recordedAt) is not a game time: it is read from deps.time.wall when the results are recorded.
+ * - The class is ticked from one `now` per tick (the game clock) for every rider; the live room keeps ticking with
  *   zero clients connected (its lifetime follows the directory entry, never a reservation timeout), so a heat
  *   finishes — and its results are written — even if every rider dropped. The injected `course` is used as is
  *   (production courses come from clubCourse and are valid; tests inject short ones).
@@ -226,9 +244,15 @@ export class LobbyRoom extends Room<{ state: LobbyState }> {
 
   static configure(deps: LobbyRoomDeps): void {
     LobbyRoom.deps = deps;
+    // One game clock for every room of the process, composed once, now (audit K1 r5 #1); the calendar clock only
+    // dates the results.
+    const time = deps.time ?? SYSTEM_TIME;
+    LobbyRoom.clocks = { game: deps.clock ?? composeGameClock(time), calendar: time.wall };
     // Results wait in a process-level outbox (see resultOutbox.ts): a room disposed while storage is down leaves
-    // its rows here, and this timer keeps retrying until they land. The timer never keeps the process alive.
-    LobbyRoom.outbox = new ResultOutbox(deps.results, deps.clock ?? Date.now);
+    // its rows here, and this timer keeps retrying until they land. The timer never keeps the process alive. Its
+    // retry delay is an interval, so it is measured on the game clock: a step of the wall neither holds a row back
+    // nor hurries its retry.
+    LobbyRoom.outbox = new ResultOutbox(deps.results, LobbyRoom.clocks.game);
     if (LobbyRoom.outboxTimer) clearInterval(LobbyRoom.outboxTimer);
     LobbyRoom.outboxTimer = setInterval(() => void LobbyRoom.outbox?.flush(), OUTBOX.retryMs);
     LobbyRoom.outboxTimer.unref();
@@ -236,6 +260,8 @@ export class LobbyRoom extends Room<{ state: LobbyState }> {
 
   static outbox: ResultOutbox | null = null;
   private static outboxTimer: NodeJS.Timeout | null = null;
+  /** The game clock (every game time) and the calendar clock (the date of a result), set by configure(). */
+  private static clocks: { game: () => number; calendar: () => number } | null = null;
 
   /** Live rooms by code in this process: the server creates exactly one live room per code (audit B2, P1). */
   private static readonly liveByCode = new Map<string, string>();
@@ -243,6 +269,11 @@ export class LobbyRoom extends Room<{ state: LobbyState }> {
   private static requireDeps(): LobbyRoomDeps {
     if (!LobbyRoom.deps) throw new Error('LobbyRoom.configure() was not called');
     return LobbyRoom.deps;
+  }
+
+  private static requireClocks(): { game: () => number; calendar: () => number } {
+    if (!LobbyRoom.clocks) throw new Error('LobbyRoom.configure() was not called');
+    return LobbyRoom.clocks;
   }
 
   /**
@@ -823,9 +854,12 @@ export class LobbyRoom extends Room<{ state: LobbyState }> {
     return named;
   }
 
-  /** Queue the results of a finished heat (once per rider) in the process-level outbox and try to write them now. */
+  /**
+   * Queue the results of a finished heat (once per rider) in the process-level outbox and try to write them now.
+   * recordedAt is the calendar date of the recording, from the wall clock — never a game time (audit K1 r5 #1).
+   */
   private recordResults(results: RoundResult[]): void {
-    const recordedAt = this.serverNow();
+    const recordedAt = LobbyRoom.requireClocks().calendar();
     LobbyRoom.outbox?.add(
       results.map((result): ResultRecord => ({
         roundId: result.roundId,
@@ -881,8 +915,9 @@ export class LobbyRoom extends Room<{ state: LobbyState }> {
     }
   }
 
+  /** The game clock (audit K1 r5 #1): every game time of the room is read here, never from the calendar clock. */
   private serverNow(): number {
-    return (this.deps().clock ?? Date.now)();
+    return LobbyRoom.requireClocks().game();
   }
 
   // ---------------------------------------------------------------------------------------------------------

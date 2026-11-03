@@ -30,7 +30,10 @@ export interface AppOptions {
   /** Test hooks for the class inside the live room (short course, short phases); production uses the defaults. */
   course?: (code: string, classNumber: number) => CourseSpec;
   timing?: { walkMs: number; resultsMs: number };
-  /** Test hook: the live room's server clock (LobbyRoom deps.clock); production uses Date.now. */
+  /**
+   * Test hook: the live room's game clock itself (LobbyRoom deps.clock), whole milliseconds that never go back;
+   * production leaves it out and the room composes its game clock from the wall and monotonic clocks (audit K1 r5 #1).
+   */
   clock?: () => number;
 }
 

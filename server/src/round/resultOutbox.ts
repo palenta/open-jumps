@@ -3,6 +3,7 @@
 // retrying on its own schedule until every row has landed. insertOnce is idempotent, so a retry after a
 // half-way failure can never duplicate a row.
 import type { ResultRecord, ResultRepository } from '../storage/repositories.js';
+import { SYSTEM_TIME } from './gameClock.js';
 
 export const OUTBOX = {
   /** Minimum time between two attempts after a failure. */
@@ -21,7 +22,12 @@ export class ResultOutbox {
   private inflight: Promise<void> | null = null;
   private nextAttemptAt = 0;
 
-  constructor(results: ResultRepository, clock: () => number = Date.now) {
+  /**
+   * `clock` measures the retry delay, an interval: it must never go back (the room passes its game clock; the default
+   * is the monotonic clock). The rows carry their own recordedAt, a calendar date the outbox never touches (audit K1
+   * r5 #1).
+   */
+  constructor(results: ResultRepository, clock: () => number = SYSTEM_TIME.monotonic) {
     this.results = results;
     this.clock = clock;
   }

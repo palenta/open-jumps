@@ -36,7 +36,10 @@ export interface BootOptions {
   course?: CourseSpec;
   timing?: { walkMs: number; resultsMs: number };
   staticDir?: string;
-  /** The live room's server clock (default Date.now): a test that must know every offset exactly freezes it. */
+  /**
+   * The live room's game clock itself (default: composed from the system's wall and monotonic clocks): a test that must
+   * know every offset exactly freezes it.
+   */
   clock?: () => number;
 }
 
