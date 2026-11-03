@@ -87,6 +87,15 @@ export function click(root: HTMLElement, selector: string): void {
   element.click();
 }
 
+/** Types a room code into the home screen's ring form and rings. */
+export function ring(app: AppUnderTest, code: string): void {
+  const form = app.root.querySelector('form[data-form="ring"]');
+  const input = form?.querySelector<HTMLInputElement>('[name="code"]');
+  if (!form || !input) throw new Error('no ring form on screen');
+  input.value = code;
+  form.dispatchEvent(new dom.Event('submit', { bubbles: true, cancelable: true }) as unknown as Event);
+}
+
 /** A finger on the middle of the tap zone. */
 export function tapZone(app: AppUnderTest): void {
   const arena = app.root.querySelector('[data-arena]');

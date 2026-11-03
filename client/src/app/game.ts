@@ -115,13 +115,19 @@ interface RoundModules {
   controller: InputController;
   interpolator: RemoteInterpolator;
   roundClock: RoundClockEstimate;
-  /** The own horse's open approach: the take-off moment in device time, for the armed tap control. */
-  armed: { fence: number; attempt: number; takeoffAt: number } | null;
+  /**
+   * The own horse's open approach with its take-off moment in SERVER ms, for the armed tap control: translated into
+   * device time whenever the control is drawn, so an approach heard before the clock was measured lights up once it
+   * is (audit K1 r2 #3).
+   */
+  armed: { fence: number; attempt: number; t0: number } | null;
   /** The last captioned event and whose horse it was (re-rendered in the locale of the moment). */
   caption: { event: CaptionEvent; riderId: string } | null;
   /**
-   * The course walk in progress as the server announced it ('class-phase' walk), in DEVICE time: the fly-over paces
-   * itself over [startedAt, endsAt]. Null until the message arrives and again for a walk of another heat.
+   * The course walk in progress as the server announced it ('class-phase' walk), in SERVER ms as sent: the fly-over
+   * paces itself over [startedAt, endsAt], read through the clock at every frame — never translated once on arrival,
+   * when a late joiner's clock may not be measured yet (audit K1 r2 #3). Null until the message arrives and again for
+   * a walk of another heat.
    */
   walk: { heatIndex: number; startedAt: number; endsAt: number } | null;
   requestedLine: 'center' | 'angle';
@@ -155,8 +161,11 @@ interface RoundModules {
  *   goes home. The arena takes no input on this screen.
  * - walk: [data-list="fences"] > li (walkModel texts), [data-focus] the focused fence number, the scene mounted in
  *   [data-arena] with the course. The fly-over paces itself over the window the server announces in the
- *   'class-phase' walk message (startedAt / endsAt in server ms, translated with the clock) — one window per heat;
- *   until it is known, and for a walk of another heat, the focus is fence 1 (audit K1 r1 #6: no client constant).
+ *   'class-phase' walk message (startedAt / endsAt in server ms) — one window per heat; until it is known, and for a
+ *   walk of another heat, the focus is fence 1 (audit K1 r1 #6: no client constant). The window is kept in server
+ *   ms and read through the clock at every frame and every clock ping: a late joiner whose clock is not measured
+ *   yet sees fence 1 for the moment, then the fence of the server's window and its end at the server's deadline —
+ *   never a walk restarted at the join (audit K1 r2 #3).
  * - round: the layout is layoutFor(rect.width, rect.height) of the MEASURED arena rectangle (deps.measure, by
  *   default getBoundingClientRect(); re-measured by resize() and on the window 'resize' event). The four controls
  *   are drawn as [data-control="turn-left"|"turn-right"|"gear"|"tap"], absolutely positioned INSIDE the arena with
@@ -169,10 +178,12 @@ interface RoundModules {
  *   hidden zones take no input). While the own horse's approach is open (from the 'approach' event
  *   until the 'takeoff' verdict) the tap control carries data-armed="true" and data-takeoff-at = clock.toClient(t0)
  *   (the device time of the take-off moment in the clock's own units — performance.now() ms in the browser), so
- *   the player sees the zone light up and a test can time its finger; both attributes go at the verdict. The
- *   take-off tap itself is armed by the same two events (InputController.approach / approachClosed): a finger on
- *   the tap zone between approaches — before the first one, or during the flight after a cleared fence, when the
- *   state already names the next fence — sends nothing and spends nothing (audit K1 r1 #1). A rider who takes control
+ *   the player sees the zone light up and a test can time its finger; both attributes go at the verdict. t0 is
+ *   kept in server ms and translated whenever the control is drawn: both attributes appear together, as soon as
+ *   the clock is measured (audit K1 r2 #3). The take-off tap itself is armed by the same two events
+ *   (InputController.approach / approachClosed): a finger on the tap zone between approaches — before the first
+ *   one, or during the flight after a cleared fence, when the state already names the next fence — sends nothing
+ *   and spends nothing (audit K1 r1 #1). A rider who takes control
  *   back — the SDK recovered, resume(), or a fresh join through Reconnect — missed the broadcasts of the time away:
  *   the server's 'approach-sync' (the approach open now, or none) arms or disarms the tap, the lit zone and the hint
  *   the same way, and an attempt whose tap already went out is never armed twice (audit K1 r2 #1).
@@ -304,21 +315,23 @@ export function createGame(deps: GameDeps): Game {
     };
   }
 
-  /** The fence the fly-over focuses on at device time `now`: fence 1 until the server's window is known. */
+  /**
+   * The fence the fly-over focuses on at device time `now`: the server's window against the server time of `now` as
+   * the clock reads it at this very moment (a refined offset moves the focus too). Fence 1 until the window is known,
+   * and until the clock is measured — a late joiner's first moments (audit K1 r2 #3).
+   */
   function focusAt(now: number): number {
     const walk = round?.walk ?? null;
     if (!round || !walk) return 1;
-    return walkFocus(walk.endsAt - walk.startedAt, round.course.fences.length, now - walk.startedAt);
+    const serverNow = deps.clock.toServer(now);
+    if (serverNow === null) return 1;
+    return walkFocus(walk.endsAt - walk.startedAt, round.course.fences.length, serverNow - walk.startedAt);
   }
 
-  /** A 'class-phase' walk: the window comes from the server's clock, translated to device time (audit K1 r1 #6). */
+  /** A 'class-phase' walk: the window is the server's, kept in server ms as sent (audit K1 r1 #6, r2 #3). */
   function onWalkPhase(message: Extract<ServerMessage, { type: 'class-phase' }>): void {
     if (!round) return;
-    const now = deps.clock.now();
-    const durationMs = Math.max(0, (message.endsAt ?? message.startedAt) - message.startedAt);
-    // Before the clock is measured (a late joiner's first second) the walk is taken to begin now, for its full length.
-    const startedAt = deps.clock.toClient(message.startedAt) ?? now;
-    round.walk = { heatIndex: message.heatIndex, startedAt, endsAt: startedAt + durationMs };
+    round.walk = { heatIndex: message.heatIndex, startedAt: message.startedAt, endsAt: Math.max(message.startedAt, message.endsAt ?? message.startedAt) };
   }
 
   function roundKey(): string {
@@ -355,8 +368,7 @@ export function createGame(deps: GameDeps): Game {
         if (own) {
           round.hint.approach(event);
           round.controller.approach(event);
-          const takeoffAt = deps.clock.toClient(event.t0);
-          round.armed = takeoffAt === null ? null : { fence: event.fence, attempt: event.attempt, takeoffAt };
+          round.armed = { fence: event.fence, attempt: event.attempt, t0: event.t0 };
         }
         break;
       case 'takeoff':
@@ -406,8 +418,7 @@ export function createGame(deps: GameDeps): Game {
     const approach = message.approach;
     round.controller.sync(`${String(message.classNumber)}#${String(message.heatIndex)}`, approach);
     round.hint.sync({ hardTurn: message.hardTurn, approach });
-    const takeoffAt = approach === null ? null : deps.clock.toClient(approach.t0);
-    round.armed = approach === null || takeoffAt === null ? null : { fence: approach.fence, attempt: approach.attempt, takeoffAt };
+    round.armed = approach === null ? null : { fence: approach.fence, attempt: approach.attempt, t0: approach.t0 };
   }
 
   // ---- the session ------------------------------------------------------------------------------------------
@@ -509,6 +520,10 @@ export function createGame(deps: GameDeps): Game {
         }
         break;
       case 'clock-ping':
+        // The session fed the ping to the clock before handing it on: what is drawn from server times (the walk's
+        // focus, the take-off moment) follows the new reading at once (audit K1 r2 #3).
+        updateHud();
+        break;
       case 'emote':
         break;
     }
@@ -888,9 +903,10 @@ export function createGame(deps: GameDeps): Game {
     set('[data-badge]', hud.badge);
     const tap = controlElements.get('tap');
     if (tap) {
-      if (round?.armed) {
+      const takeoffAt = round?.armed ? deps.clock.toClient(round.armed.t0) : null;
+      if (takeoffAt !== null) {
         tap.setAttribute('data-armed', 'true');
-        tap.setAttribute('data-takeoff-at', String(round.armed.takeoffAt));
+        tap.setAttribute('data-takeoff-at', String(takeoffAt));
       } else {
         tap.removeAttribute('data-armed');
         tap.removeAttribute('data-takeoff-at');

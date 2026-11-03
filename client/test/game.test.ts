@@ -18,6 +18,7 @@ import {
   type WindowLike,
 } from '../src/app/game.js';
 import type { ApiResult, CreateRoomReply } from '../src/net/api.js';
+import { ClientClock } from '../src/net/clientClock.js';
 import type { SessionEnd, SessionStatus } from '../src/net/roomSession.js';
 import type {
   ClassTableWire,
@@ -522,6 +523,8 @@ interface Harness {
 interface BootOptions {
   script?: Script;
   stateOnConnect?: LobbyStateSnapshot;
+  /** The clock the game reads instead of the harness's ready test clock (e.g. a real ClientClock fed with pings). */
+  clock?: ClockLike;
 }
 
 /** Every game built in this file is destroyed and its root removed after the test. */
@@ -560,7 +563,7 @@ async function boot(options: BootOptions = {}): Promise<Harness> {
       sessions.push(session);
       return session;
     },
-    clock,
+    clock: options.clock ?? clock,
     scene,
     locale: 'en',
     measure: () => ({ ...arena }),
@@ -667,8 +670,9 @@ async function ring(h: Harness, code: string): Promise<void> {
 }
 
 /** Signed in on home → the host creates room ABCDEF and is in its lobby with a connected session. */
-async function hostInLobby(script: Script = {}, stateOnConnect: LobbyStateSnapshot = snapshot()): Promise<Harness> {
+async function hostInLobby(script: Script = {}, stateOnConnect: LobbyStateSnapshot = snapshot(), clock?: ClockLike): Promise<Harness> {
   const h = await boot({
+    ...(clock ? { clock } : {}),
     script: {
       createRoom: [ok({ code: 'ABCDEF', roomId: 'r1' })],
       lobby: [ok(view()), ok(view()), ok(view()), ok(view()), ok(view())],
@@ -1167,7 +1171,9 @@ describe("the fly-over follows the server's walk window (audit K1 r1 #6)", () =>
 
   it('the window is read through the clock offset: server times become device times', async () => {
     const h = await hostInLobby();
-    h.clock.toClient = (serverTime) => serverTime - 5_000; // the server's clock runs 5 s ahead of this device
+    // The server's clock runs 5 s ahead of this device (both directions of the translation, as a real clock has them).
+    h.clock.toClient = (serverTime) => serverTime - 5_000;
+    h.clock.toServer = (clientTime) => clientTime + 5_000;
     h.session().emitMessage({ type: 'class-course', course: course3, classNumber: 1 });
     await walkOf(h, 0, h.clock.now() + 5_000, 9_000); // began right now in server terms
     expect(focusShown(h)).toBe('1');
@@ -1224,6 +1230,94 @@ describe("the fly-over follows the server's walk window (audit K1 r1 #6)", () =>
     h.clock.t += 9_000;
     expect(focusShown(h)).toBe('1');
     expect(focusDrawn(h)).toBe(1);
+  });
+});
+
+describe('a late joiner whose clock is not measured yet (audit K1 r2 #3)', () => {
+  /** The device's own ClientClock, not measured yet, and the server's clock running 7 s ahead of the device. */
+  function lateDevice(serverAheadMs = 7_000) {
+    const device = { t: 50_000 };
+    const clock = new ClientClock(() => device.t);
+    return { device, clock, serverNow: () => device.t + serverAheadMs };
+  }
+
+  /** A clock ping as the session handles it: the ClientClock takes it first, then the game hears the message. */
+  function ping(h: Harness, clock: ClientClock, serverSent: number): void {
+    clock.onPing(serverSent);
+    h.session().emitMessage({ type: 'clock-ping', serverSent });
+  }
+
+  /** A series of three pings 200 ms apart, as the room sends at a join (the server's clock `serverAheadMs` ahead). */
+  function series(h: Harness, late: ReturnType<typeof lateDevice>, serverAheadMs = 7_000): void {
+    for (let i = 0; i < 3; i += 1) {
+      ping(h, late.clock, late.device.t + serverAheadMs);
+      late.device.t += 200;
+    }
+  }
+
+  const focusShown = (h: Harness): string => text(h.root.querySelector('[data-focus]'));
+  const focusDrawn = (h: Harness, now: number): number | null => {
+    h.game.frame(now);
+    return h.scene.frames.at(-1)?.focusFence ?? null;
+  };
+
+  it('class-phase of a walk 4 s under way while toClient is still null → fence 1 for the moment → three pings → the current fence of the server\'s window, and the last fence by the server\'s deadline', async () => {
+    const late = lateDevice();
+    const h = await hostInLobby({}, snapshot(), late.clock);
+    const startedAt = late.serverNow() - 4_000; // the 10 s walk began 4 s before she came in
+    const endsAt = startedAt + 10_000;
+    h.session().emitMessage({ type: 'class-course', course: course3, classNumber: 1 });
+    h.session().emitMessage(phaseMessage('walk', 0, startedAt, endsAt));
+    h.session().emitState(snapshot({ phase: 'walk', heatIndex: 0 }));
+    await settle();
+    expect(h.root.dataset.screen).toBe('walk');
+    expect(late.clock.toClient(startedAt)).toBeNull();
+    expect(focusShown(h)).toBe('1'); // no clock yet: the first fence for the moment
+    expect(focusDrawn(h, late.device.t)).toBe(1);
+    series(h, late);
+    expect(late.clock.ready()).toBe(true);
+    // 4.6 s of the server's 10 s window: fence 2 of 3 — not a walk restarted at her join (that would still be fence 1).
+    expect(focusShown(h)).toBe('2'); // the ping itself brought the screen up to date
+    expect(focusDrawn(h, late.device.t)).toBe(2);
+    late.device.t += 2_200; // 6.8 s
+    expect(focusDrawn(h, late.device.t)).toBe(3);
+    late.device.t = endsAt - 7_000 - 1; // the last millisecond before the server's deadline, in device time
+    expect(focusDrawn(h, late.device.t)).toBe(3);
+  });
+
+  it('the window is read through the clock at every frame, never frozen at arrival: a refined offset from the next series moves the focus with it', async () => {
+    const late = lateDevice(9_000); // the server is in truth 9 s ahead…
+    const h = await hostInLobby({}, snapshot(), late.clock);
+    series(h, late, 7_000); // …but the join series measured 7 s (a slow start of the network)
+    const startedAt = late.serverNow() - 1_000;
+    h.session().emitMessage({ type: 'class-course', course: course3, classNumber: 1 });
+    h.session().emitMessage(phaseMessage('walk', 0, startedAt, startedAt + 6_000));
+    h.session().emitState(snapshot({ phase: 'walk', heatIndex: 0 }));
+    await settle();
+    expect(focusDrawn(h, late.device.t)).toBe(1);
+    late.device.t += 1_500; // a new series (the room measures again at every walk) finds the true 9 s
+    series(h, late, 9_000);
+    // 1 + 1.5 + 0.6 = 3.1 s of the server's 6 s window: fence 2 (with the offset frozen at 7 s it would read 1.1 s: fence 1).
+    expect(focusDrawn(h, late.device.t)).toBe(2);
+    expect(focusShown(h)).toBe('2');
+  });
+
+  it('an approach-sync that arrives before the clock is measured lights the tap zone with its take-off moment as soon as the clock can translate it', async () => {
+    const late = lateDevice();
+    const h = await hostInLobby({}, snapshot(), late.clock);
+    startClass(h);
+    await settle();
+    expect(h.root.dataset.screen).toBe('round');
+    const t0 = late.serverNow() + 3_000;
+    h.session().emitMessage({ type: 'approach-sync', classNumber: 1, heatIndex: 0, hardTurn: false, approach: { fence: 1, attempt: 1, t0 } });
+    h.game.frame(late.device.t);
+    const tap = q(h.root, '[data-control="tap"]');
+    expect(tap.hasAttribute('data-armed')).toBe(false); // the take-off moment is not known in device time yet
+    expect(tap.hasAttribute('data-takeoff-at')).toBe(false);
+    series(h, late);
+    h.game.frame(late.device.t);
+    expect(tap.getAttribute('data-armed')).toBe('true');
+    expect(tap.getAttribute('data-takeoff-at')).toBe(String(t0 - 7_000));
   });
 });
 
