@@ -73,6 +73,25 @@ async function engineRows(code: string, count: number) {
   return live.services.repos.results.listByRound(roundId);
 }
 
+describe('a rider who left the room for good keeps her name on the heat screen and in the class table', () => {
+  it('Ana leaves before her fence: no participant any more, yet her heat row and her table row read "Ana on Dakota", as the engine wrote her result', async () => {
+    const { maria, app, anaDevice, ana, code } = await heatOfTwo();
+    await until(() => (app.game.session?.state?.riders[anaDevice.profile.id]?.positionM ?? 0) >= 5, 5000, 'Ana at 5 m');
+    await ana.leave(); // consented: out of the room for good, eliminated in the heat
+    await until(() => app.game.session?.state?.participants[anaDevice.profile.id] === undefined, 3000, 'Ana gone from the participants');
+    const screen = await heatScreenRows(app);
+    const rows = await engineRows(code, 2);
+    const anaRow = rows.find((r) => r.accountId === anaDevice.profile.id);
+    expect(anaRow).toMatchObject({ status: 'eliminated', eliminationReason: 'disconnected' });
+    expect(screen.get(anaDevice.profile.id)).toBe(expectedRow(anaDevice, anaRow ?? { faults: -1, status: '' }));
+    const mariaRow = rows.find((r) => r.accountId === maria.profile.id);
+    expect(screen.get(maria.profile.id)).toBe(expectedRow(maria, mariaRow ?? { faults: -1, status: '' }));
+    await until(() => app.root.querySelector('[data-list="results"]') !== null, 10000, 'the class table');
+    expect(text(app.root.querySelector(`tr[data-id="${anaDevice.profile.id}"] td:nth-child(2)`))).toBe(translate('en', 'names.riderOnPony', { rider: anaDevice.profile.riderName, pony: anaDevice.profile.ponyName }));
+    app.game.destroy();
+  }, 40000);
+});
+
 describe('the heat screen at the results boundary (audit K1 r2 #2)', () => {
   it('Maria, passive in collected canter, is the last at the line with a time fault: her row says Finished with the chip and the time fault, as the engine wrote it', async () => {
     const { maria, app, anaDevice, ana, code } = await heatOfTwo();

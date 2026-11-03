@@ -12,9 +12,8 @@ import { ColyseusTestServer } from '@colyseus/testing';
 import type { CourseSpec } from '@open-jumps/shared';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { SESSION } from '../src/auth/sessions.js';
-import { CLASS_PROTOCOL, LOBBY_ROOM_NAME, LobbyRoom, type LobbyState } from '../src/colyseus/LobbyRoom.js';
+import { CLASS_PROTOCOL, LOBBY_ROOM_NAME, LobbyRoom, type ClassTableRowWire, type LobbyState } from '../src/colyseus/LobbyRoom.js';
 import { createUpgradeGuard } from '../src/http/origin.js';
-import type { ClassTableRow } from '../src/round/classFlow.js';
 import { RUN } from '../src/round/courseRunner.js';
 import type { ResultRepository } from '../src/storage/repositories.js';
 import { ADMIN_KEY, buildServices, registerRider, uniqueRiderName, type Services } from './helpers.js';
@@ -180,7 +179,7 @@ const roundEvents = (seat: Seat, type: string, riderId?: string) =>
     .map((m) => m.payload as Record<string, unknown>)
     .filter((e) => e.type === type && (riderId === undefined || e.riderId === riderId));
 const phaseMessages = (seat: Seat) => seat.received.filter((m) => m.type === 'class-phase').map((m) => m.payload as { phase: string; heatIndex: number });
-const classTable = (seat: Seat) => seat.received.find((m) => m.type === 'class-table')?.payload as { table: Record<string, ClassTableRow[]> } | undefined;
+const classTable = (seat: Seat) => seat.received.find((m) => m.type === 'class-table')?.payload as { table: Record<string, ClassTableRowWire[]> } | undefined;
 
 /** True when `expected` appears in `actual` in this order (other messages may sit in between). */
 function inOrder(actual: { phase: string; heatIndex: number }[], expected: { phase: string; heatIndex: number }[]): boolean {
@@ -965,4 +964,40 @@ describe('audit K1 r2 #2: the state the results phase arrives with carries the f
     for (const row of rows) expect(published[row.accountId], row.accountId).toMatchObject({ status: row.status, faults: row.faults });
     await hostSeat.client.leave();
   }, 40000);
+});
+
+describe("the names of the heat's riders and of the class table: a rider who left the room keeps her name", () => {
+  it('riders in the state carry riderName and ponyName from the start; a consented leave removes the participant, not the name; the class table rows are named, also for a late joiner; a rider admitted over HTTP who never connected is named from the accounts', async () => {
+    const { entry, room, riders } = await openRoom(3);
+    const [host, friend, absent] = riders as [Rider, Rider, Rider];
+    const hostSeat = await sit(room.roomId, entry.code, host.token, host.account.id);
+    const friendSeat = await sit(room.roomId, entry.code, friend.token, friend.account.id);
+    // `absent` was admitted over the directory and never opened a WebSocket: the room never saw her profile.
+    const view = (id: string) => hostSeat.client.state.riders.get(id);
+    await clocksSynced();
+    await startRiding(hostSeat);
+    expect(view(host.account.id)).toMatchObject({ riderName: host.account.riderName, ponyName: 'Dakota' });
+    expect(view(friend.account.id)).toMatchObject({ riderName: friend.account.riderName, ponyName: 'Dakota' });
+    await until(() => view(absent.account.id)?.riderName === absent.account.riderName, 2000, 'the absent rider named from the accounts');
+    expect(view(absent.account.id)).toMatchObject({ ponyName: 'Dakota', autopilot: true });
+
+    await sleep(500);
+    await friendSeat.client.leave(); // consented: out of the room for good, eliminated in the heat
+    await until(() => !hostSeat.client.state.participants.has(friend.account.id), 3000, 'the friend gone from the participants');
+    await until(() => view(friend.account.id)?.status === 'eliminated', 3000, 'the friend eliminated');
+    expect(view(friend.account.id)).toMatchObject({ riderName: friend.account.riderName, ponyName: 'Dakota' });
+
+    await until(() => hostSeat.client.state.phase === 'done', 25000, "phase 'done'");
+    // Every row of every class (the absent rider never sent her settings: she rides in the default class).
+    const named = (table: Record<string, ClassTableRowWire[]> | undefined) => Object.values(table ?? {}).flat().map((r) => [r.riderId, r.riderName, r.ponyName]).sort();
+    const expected = [host, friend, absent].map((r) => [r.account.id, r.account.riderName, 'Dakota']).sort();
+    expect(named(classTable(hostSeat)?.table)).toEqual(expected);
+    // A late joiner after the class is done never saw the friend as a participant: the table itself names her.
+    const late = await sit(room.roomId, entry.code, absent.token, absent.account.id);
+    await until(() => classTable(late) !== undefined, 2000, 'the table for the late joiner');
+    expect(late.client.state.participants.has(friend.account.id)).toBe(false);
+    expect(named(classTable(late)?.table)).toEqual(expected);
+    await late.client.leave();
+    await hostSeat.client.leave();
+  }, 45000);
 });

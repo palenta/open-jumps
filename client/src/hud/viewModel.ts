@@ -86,6 +86,26 @@ export interface HudInput {
   requestedGear: Gear;
 }
 
+/**
+ * Who is called what, from everything the client holds: the state's participants, then the heat's rider entries, then
+ * the class table's rows — a rider who left the room for good is no participant any more, but her rider entry (until
+ * the next heat) and her table row still carry her names from the server. The first source wins, an empty name is no
+ * name, and the pony's gender is unknown here ('yegua'); the caller adds the own profile on top.
+ */
+export function namesFrom(state: LobbyStateSnapshot | null, table: ClassTableWire | null): HudNames {
+  const result: HudNames = {};
+  const add = (accountId: string, riderName: string, ponyName: string): void => {
+    if (riderName === '' || Object.prototype.hasOwnProperty.call(result, accountId)) return;
+    result[accountId] = { riderName, ponyName, ponyGender: 'yegua' };
+  };
+  if (state) {
+    for (const [id, participant] of Object.entries(state.participants)) add(id, participant.riderName, participant.ponyName);
+    for (const [id, rider] of Object.entries(state.riders)) add(id, rider.riderName, rider.ponyName);
+  }
+  if (table) for (const rows of Object.values(table)) for (const row of rows) add(row.riderId, row.riderName, row.ponyName);
+  return result;
+}
+
 /** A name "Rider on Pony" in the locale; a missing account id reads as the id itself (never blank). */
 export function riderOnPony(locale: Locale, names: HudNames, accountId: string): string {
   const entry = Object.prototype.hasOwnProperty.call(names, accountId) ? names[accountId] : undefined;

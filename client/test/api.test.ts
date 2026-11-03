@@ -7,7 +7,7 @@ import type { LobbyView as ServerLobbyView } from '../../server/src/http/rooms.j
 import type { JoinDecision as ServerJoinDecision, ParticipantStatus as ServerParticipantStatus } from '../../server/src/rooms/admission.js';
 import type { RoomMessage as ServerRoomMessage } from '../../server/src/rooms/authz.js';
 import type { RoundEvent as ServerRoundEvent } from '../../server/src/round/roundEngine.js';
-import type { ClassTableRow as ServerClassTableRow } from '../../server/src/round/classFlow.js';
+import type { ClassTableRowWire as ServerClassTableRow } from '../../server/src/colyseus/LobbyRoom.js';
 import { GameApi, type FetchLike } from '../src/net/api.js';
 import type {
   ClassTableRowWire,

@@ -15,7 +15,7 @@ import {
   type HeightClass,
   type Locale,
 } from '@open-jumps/shared';
-import { heatResultsModel, hudModel, resultsModel, riderOnPony, type HudNames } from '../hud/viewModel.js';
+import { heatResultsModel, hudModel, namesFrom, resultsModel, riderOnPony, type HudNames } from '../hud/viewModel.js';
 import { InputController } from '../input/controller.js';
 import { hitTest, layoutFor, needsRotation, type Control, type Layout } from '../input/layout.js';
 import { LobbyFlow, type LobbyPhase } from '../lobby/lobbyFlow.js';
@@ -199,8 +199,10 @@ interface RoundModules {
  *   never an empty page).
  * - Lifecycle: document 'visibilitychange' (visible) and window 'pageshow' → session.resume(); window 'resize' →
  *   resize(). destroy() removes the listeners, leaves the session and disposes the scene.
- * - Captions use the participants' names from the state; the pony's gender is known only for the own rider
- *   (the state carries none), others read as 'yegua'.
+ * - Names (captions, the labels over the horses, the heat screen, the class table) come from the state's
+ *   participants, then the heat's rider entries, then the class table's rows (namesFrom): a rider who left the room
+ *   for good is no participant any more but keeps her name. The pony's gender is known only for the own rider (the
+ *   state carries none), others read as 'yegua'.
  */
 export function createGame(deps: GameDeps): Game {
   const doc = deps.document;
@@ -265,13 +267,7 @@ export function createGame(deps: GameDeps): Game {
   }
 
   function names(): HudNames {
-    const result: HudNames = {};
-    const current = state();
-    if (current) {
-      for (const [id, participant] of Object.entries(current.participants)) {
-        result[id] = { riderName: participant.riderName, ponyName: participant.ponyName, ponyGender: me !== null && id === me.id ? me.ponyGender : 'yegua' };
-      }
-    }
+    const result = namesFrom(state(), table);
     if (me) result[me.id] = { riderName: me.riderName, ponyName: me.ponyName, ponyGender: me.ponyGender };
     return result;
   }

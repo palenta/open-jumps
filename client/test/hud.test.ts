@@ -3,8 +3,8 @@
 // functions of the room snapshot and the locale, so the DOM layer only prints what it gets.
 import { MESSAGES } from '@open-jumps/shared';
 import { describe, expect, it } from 'vitest';
-import { heatResultsModel, hudModel, resultsModel, riderOnPony, type HudInput, type HudNames } from '../src/hud/viewModel.js';
-import type { ClassTableWire, LobbyStateSnapshot, RiderView } from '../src/net/types.js';
+import { heatResultsModel, hudModel, namesFrom, resultsModel, riderOnPony, type HudInput, type HudNames } from '../src/hud/viewModel.js';
+import type { ClassTableRowWire, ClassTableWire, LobbyStateSnapshot, RiderView } from '../src/net/types.js';
 
 const names: HudNames = {
   host: { riderName: 'Maria', ponyName: 'Dakota', ponyGender: 'yegua' },
@@ -23,6 +23,8 @@ const rider = (accountId: string, over: Partial<RiderView> = {}): RiderView => (
   status: 'riding',
   autopilot: false,
   lastLabel: '',
+  riderName: '',
+  ponyName: '',
   ...over,
 });
 
@@ -58,10 +60,10 @@ const input = (over: Partial<HudInput> = {}): HudInput => ({
 });
 
 const table: ClassTableWire = {
-  '60': [{ place: 1, riderId: 'ana', faults: 0, timeMs: 55_200, status: 'finished', eliminationReason: null, autopilot: false }],
+  '60': [{ place: 1, riderId: 'ana', riderName: 'Ana', ponyName: 'Luna', faults: 0, timeMs: 55_200, status: 'finished', eliminationReason: null, autopilot: false }],
   '70': [
-    { place: 1, riderId: 'host', faults: 4, timeMs: 60_100, status: 'finished', eliminationReason: null, autopilot: true },
-    { place: null, riderId: 'bea', faults: 8, timeMs: null, status: 'eliminated', eliminationReason: 'refusals', autopilot: false },
+    { place: 1, riderId: 'host', riderName: 'Maria', ponyName: 'Dakota', faults: 4, timeMs: 60_100, status: 'finished', eliminationReason: null, autopilot: true },
+    { place: null, riderId: 'bea', riderName: 'Bea', ponyName: 'Nube', faults: 8, timeMs: null, status: 'eliminated', eliminationReason: 'refusals', autopilot: false },
   ],
 };
 
@@ -205,7 +207,7 @@ describe('resultsModel', () => {
 
   it('names the other elimination reasons in the locale', () => {
     const eliminated = (reason: 'time' | 'disconnected'): ClassTableWire => ({
-      '60': [{ place: null, riderId: 'ana', faults: 0, timeMs: null, status: 'eliminated', eliminationReason: reason, autopilot: false }],
+      '60': [{ place: null, riderId: 'ana', riderName: 'Ana', ponyName: 'Luna', faults: 0, timeMs: null, status: 'eliminated', eliminationReason: reason, autopilot: false }],
     });
     expect(resultsModel(eliminated('time'), names, 'en', 'host')[0]?.rows[0]?.note).toBe('eliminada — time');
     expect(resultsModel(eliminated('disconnected'), names, 'en', 'host')[0]?.rows[0]?.note).toBe('eliminada — sin conexión');
@@ -213,7 +215,7 @@ describe('resultsModel', () => {
   });
 
   it('an unknown rider id shows the id as the name', () => {
-    const rows = resultsModel({ '60': [{ place: 1, riderId: 'ghost', faults: 0, timeMs: 50_000, status: 'finished', eliminationReason: null, autopilot: false }] }, names, 'en', 'host');
+    const rows = resultsModel({ '60': [{ place: 1, riderId: 'ghost', riderName: '', ponyName: '', faults: 0, timeMs: 50_000, status: 'finished', eliminationReason: null, autopilot: false }] }, names, 'en', 'host');
     expect(rows[0]?.rows[0]?.name).toBe('ghost');
   });
 
@@ -245,5 +247,34 @@ describe('heatResultsModel (audit K1 r1 #2: what the results screen shows betwee
     expect(heatResultsModel(snapshot({ phase: 'done', riders: {} }), names, 'en', 'host')).toEqual([]);
     const es = heatResultsModel(snapshot({ phase: 'results', riders: { host: rider('host', { faults: 4, status: 'finished' }) } }), names, 'es', 'host');
     expect(es[0]).toMatchObject({ name: 'Maria con Dakota', faultsText: '4 puntos', statusText: 'Meta' });
+  });
+});
+
+describe('namesFrom: a rider who left the room is named by her rider entry or her table row', () => {
+  const row = (riderId: string, riderName: string, ponyName: string): ClassTableRowWire => ({ place: null, riderId, riderName, ponyName, faults: 4, timeMs: null, status: 'eliminated', eliminationReason: 'disconnected', autopilot: false });
+
+  it("participants first, then the heat's riders, then the class table rows; empty names are skipped; nothing without a source", () => {
+    const state = snapshot({
+      participants: { host: { accountId: 'host', riderName: 'Maria', ponyName: 'Dakota', isHost: true } },
+      riders: { host: rider('host', { riderName: 'Other', ponyName: 'X' }), ana: rider('ana', { riderName: 'Ana', ponyName: 'Luna' }), cris: rider('cris') },
+    });
+    const table: ClassTableWire = { '70': [row('bea', 'Bea', 'Nube'), row('ana', 'Anita', 'Z'), row('dani', '', '')] };
+    expect(namesFrom(state, table)).toEqual({
+      host: { riderName: 'Maria', ponyName: 'Dakota', ponyGender: 'yegua' },
+      ana: { riderName: 'Ana', ponyName: 'Luna', ponyGender: 'yegua' },
+      bea: { riderName: 'Bea', ponyName: 'Nube', ponyGender: 'yegua' },
+    });
+    expect(namesFrom(state, null)).toEqual({
+      host: { riderName: 'Maria', ponyName: 'Dakota', ponyGender: 'yegua' },
+      ana: { riderName: 'Ana', ponyName: 'Luna', ponyGender: 'yegua' },
+    });
+    expect(namesFrom(null, null)).toEqual({});
+  });
+
+  it('heatResultsModel and resultsModel print those names, and an id only for a rider nobody can name', () => {
+    const state = snapshot({ phase: 'results', participants: {}, riders: { bea: rider('bea', { riderName: 'Bea', ponyName: 'Nube', status: 'eliminated', faults: 4 }), cris: rider('cris', { status: 'finished' }) } });
+    const names = namesFrom(state, { '60': [row('bea', 'Bea', 'Nube')] });
+    expect(heatResultsModel(state, names, 'en', 'host').map((r) => r.name)).toEqual(['cris', 'Bea on Nube']);
+    expect(resultsModel({ '60': [row('bea', 'Bea', 'Nube')] }, names, 'es', 'host')[0]?.rows[0]?.name).toBe('Bea con Nube');
   });
 });

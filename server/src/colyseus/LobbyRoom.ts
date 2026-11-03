@@ -17,7 +17,7 @@ import { isAllowedOrigin } from '../http/origin.js';
 import type { RoomDirectory, RoomEntry } from '../http/rooms.js';
 import { ROOM_CAPACITY } from '../rooms/admission.js';
 import { RIDER_ONLY_MESSAGES, authorizeRoomMessage, validateRoomMessage, type RoomMessage } from '../rooms/authz.js';
-import { ClassFlow, CLASS_TIMING, type ClassEvent } from '../round/classFlow.js';
+import { ClassFlow, CLASS_TIMING, type ClassEvent, type ClassTable, type ClassTableRow } from '../round/classFlow.js';
 import { ClockSync } from '../round/clockSync.js';
 import { OUTBOX, ResultOutbox } from '../round/resultOutbox.js';
 import { RUN } from '../round/courseRunner.js';
@@ -70,6 +70,9 @@ export interface LobbyRoomDeps {
  *   same patch that says 'results': every rider of the heat finished or eliminated, with the faults of the results
  *   (time faults included), never the values of the tick before (audit K1 r2 #2). `riders` keeps them through the
  *   results phase; the next heat's 'riding' replaces them.
+ * - Every `riders` entry and every 'class-table' row carries riderName and ponyName (profiles learnt at onAuth; a
+ *   rider admitted over the directory who never connected is named from the accounts when her names land): a rider
+ *   who leaves the room for good is no participant any more, and the client names her from these.
  * - When a heat ends, every result is written with results.insertOnce; the class table is sent as 'class-table'
  *   { table } to everyone when the class is done, and to any client that joins while the class is already done.
  *   A client joining during a class gets 'class-course', then 'class-phase' for the phase in progress (with its
@@ -137,10 +140,17 @@ export const RiderView = schema(
     status: t.string().default('riding'),
     autopilot: t.boolean().default(false),
     lastLabel: t.string().default(''),
+    // The rider's names, as shown over the horse and on the heat screen: a rider who leaves the room for good is no
+    // participant any more, while her rider entry stays until the next heat.
+    riderName: t.string().default(''),
+    ponyName: t.string().default(''),
   },
   'RiderView',
 );
 export type RiderView = SchemaType<typeof RiderView>;
+
+/** A class table row as sent in 'class-table': the pure row plus the rider's names (a rider who left is no participant any more). */
+export type ClassTableRowWire = ClassTableRow & { riderName: string; ponyName: string };
 
 /** Room state: no pending or kicked names here (host-only lists live in the HTTP lobby view), only a count. */
 export const LobbyState = schema(
@@ -277,7 +287,7 @@ export class LobbyRoom extends Room<{ state: LobbyState }> {
   private classId = '';
   /** Riders of the running heat (account ids). */
   private heatRiders = new Set<string>();
-  private lastTable: unknown = null;
+  private lastTable: Record<string, ClassTableRowWire[]> | null = null;
   /** Dropped riders whose seat is kept for a while (by account id). */
   private readonly reconnections = new Map<string, Reconnection>();
   private simulating = false;
@@ -545,6 +555,7 @@ export class LobbyRoom extends Room<{ state: LobbyState }> {
     });
     const timing = deps.timing ? { walkMs: deps.timing.walkMs, resultsMs: deps.timing.resultsMs } : CLASS_TIMING;
     this.flow = new ClassFlow({ classId: this.classId, course, riders, order, mode: 'ranked', seed: this.classId, timing });
+    this.learnProfiles(riders.map((r) => r.riderId).filter((id) => !this.profiles.has(id)));
     this.course = course;
     this.heatRiders = new Set();
     this.lastTable = null;
@@ -590,6 +601,9 @@ export class LobbyRoom extends Room<{ state: LobbyState }> {
           const view = new RiderView();
           view.accountId = rider.riderId;
           view.heightClass = rider.heightClass;
+          const names = this.namesOf(rider.riderId);
+          view.riderName = names.riderName;
+          view.ponyName = names.ponyName;
           this.state.riders.set(rider.riderId, view);
         }
         // A rider with no live connection at the start rides on autopilot until they come back.
@@ -607,7 +621,7 @@ export class LobbyRoom extends Room<{ state: LobbyState }> {
         this.recordResults(flow.results().filter((r) => r.roundId === `${this.classId}#${event.heatIndex}`));
       }
       if (event.phase === 'done') {
-        this.lastTable = flow.table();
+        this.lastTable = this.withNames(flow.table());
         this.broadcast('class-table', { table: this.lastTable });
       }
       this.broadcast('class-phase', { phase: event.phase, heatIndex: event.heatIndex, startedAt: event.at, endsAt: event.endsAt });
@@ -637,6 +651,43 @@ export class LobbyRoom extends Room<{ state: LobbyState }> {
       const label = rider.lastLabel ?? '';
       if (view.lastLabel !== label) view.lastLabel = label;
     }
+  }
+
+  /** The names of an account as the room knows them (from onAuth, or learnt from the accounts); '' while unknown. */
+  private namesOf(accountId: string): { riderName: string; ponyName: string } {
+    const profile = this.profiles.get(accountId);
+    return { riderName: profile?.riderName ?? '', ponyName: profile?.ponyName ?? '' };
+  }
+
+  /**
+   * A rider of the class who never opened a WebSocket (admitted over the directory: in the class like any admitted
+   * participant, on autopilot) is unknown to onAuth: her names are read from the accounts and filled into her rider
+   * entry when they land; the class table is built later, from the profiles known by then.
+   */
+  private learnProfiles(accountIds: readonly string[]): void {
+    for (const accountId of accountIds) {
+      void this.deps()
+        .accounts.getPublicProfile(accountId)
+        .then(
+          (profile) => {
+            if (!profile || this.profiles.has(accountId)) return;
+            this.profiles.set(accountId, { riderName: profile.riderName, ponyName: profile.ponyName, ponyCategory: profile.ponyCategory });
+            const view = this.state.riders.get(accountId);
+            if (view) {
+              view.riderName = profile.riderName;
+              view.ponyName = profile.ponyName;
+            }
+          },
+          () => undefined, // storage trouble: the rider stays unnamed here; the next connection of hers brings the profile
+        );
+    }
+  }
+
+  /** The class table with every row named (the table itself is pure; the room knows the names). */
+  private withNames(table: ClassTable): Record<string, ClassTableRowWire[]> {
+    const named: Record<string, ClassTableRowWire[]> = {};
+    for (const [heightClass, rows] of Object.entries(table)) named[heightClass] = (rows ?? []).map((row) => ({ ...row, ...this.namesOf(row.riderId) }));
+    return named;
   }
 
   /** Queue the results of a finished heat (once per rider) in the process-level outbox and try to write them now. */

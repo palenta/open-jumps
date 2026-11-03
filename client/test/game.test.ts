@@ -4,7 +4,7 @@
 // happy-dom for the document, a scripted API, a scripted room session, a recording scene, a settable clock and
 // window — and pinned through the DOM contract in game.ts (data attributes, pointerdown on the arena, the
 // lifecycle events, the round modules re-created per class-course).
-import type { ApproachState, CourseSpec, TakeoffOutcome } from '@open-jumps/shared';
+import { caption as captionOf, type ApproachState, type CourseSpec, type TakeoffOutcome } from '@open-jumps/shared';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   createGame,
@@ -409,6 +409,8 @@ const rider = (accountId: string, over: Partial<RiderView> = {}): RiderView => (
   status: 'riding',
   autopilot: false,
   lastLabel: '',
+  riderName: '',
+  ponyName: '',
   ...over,
 });
 
@@ -460,8 +462,8 @@ const clean: TakeoffOutcome = { kind: 'clean', faults: 0, cleared: true, label: 
 
 const table: ClassTableWire = {
   '70': [
-    { place: 1, riderId: 'ana', faults: 0, timeMs: 55_200, status: 'finished', eliminationReason: null, autopilot: false },
-    { place: 2, riderId: 'host', faults: 4, timeMs: 60_100, status: 'finished', eliminationReason: null, autopilot: false },
+    { place: 1, riderId: 'ana', riderName: 'Ana', ponyName: 'Luna', faults: 0, timeMs: 55_200, status: 'finished', eliminationReason: null, autopilot: false },
+    { place: 2, riderId: 'host', riderName: 'Maria', ponyName: 'Dakota', faults: 4, timeMs: 60_100, status: 'finished', eliminationReason: null, autopilot: false },
   ],
 };
 
@@ -1885,6 +1887,45 @@ describe('taking control back (audit K1 r2 #1)', () => {
     h.clock.t = t0;
     press(h, TAP);
     expect(h.session().sentOf('tap')).toEqual([]);
+  });
+});
+
+describe('a rider who left the room keeps her name on every screen', () => {
+  /** Bea rode in the heat and left the room for good: no participant any more; her rider entry carries her name. */
+  const bea = (over: Partial<RiderView> = {}): RiderView => rider('bea', { riderName: 'Bea', ponyName: 'Nube', ...over });
+  const beaRow = { place: null, riderId: 'bea', riderName: 'Bea', ponyName: 'Nube', faults: 4, timeMs: null, status: 'eliminated' as const, eliminationReason: 'disconnected' as const, autopilot: false };
+
+  it('the heat screen between the heats names her from her rider entry', async () => {
+    const h = await inRound();
+    h.session().emitState(snapshot({ phase: 'results', heatIndex: 0, riders: { host: rider('host', { status: 'finished' }), ana: rider('ana', { status: 'finished' }), bea: bea({ status: 'eliminated', faults: 4 }) } }));
+    await settle();
+    expect(text(h.root.querySelector('[data-list="heat"] > li[data-id="bea"]'))).toBe('Bea on Nube · 4 faults · eliminada');
+    expect(text(h.root.querySelector('[data-list="heat"] > li[data-id="ana"]'))).toBe('Ana on Luna · 0 faults · Finished');
+  });
+
+  it('her caption and her label over the horse name her too', async () => {
+    const h = await inRound();
+    h.session().emitState(ridingState({ riders: { host: rider('host'), ana: rider('ana'), bea: bea() } }));
+    h.session().emitMessage(roundEvent({ type: 'eliminated', riderId: 'bea', at: h.clock.now(), reason: 'disconnected' }));
+    expect(text(h.root.querySelector('[data-hud-caption]'))).toBe(captionOf('en', { type: 'eliminated', reason: 'disconnected' }, { rider: 'Bea', pony: 'Nube', ponyGender: 'yegua' }));
+    h.game.frame(h.clock.now());
+    expect(h.scene.frames.at(-1)?.riders.find((r) => r.id === 'bea')?.label).toBe('Bea on Nube');
+  });
+
+  it('the class table names her from its row, and a late joiner who never saw her as a participant reads the same', async () => {
+    const h = await inRound();
+    h.session().emitMessage({ type: 'class-table', table: { '70': [...(table['70'] ?? []), beaRow] } });
+    h.session().emitState(snapshot({ phase: 'done', heatIndex: 0 }));
+    await settle();
+    expect(text(h.root.querySelector('tr[data-id="bea"] td:nth-child(2)'))).toBe('Bea on Nube');
+    expect(text(h.root.querySelector('tr[data-id="ana"] td:nth-child(2)'))).toBe('Ana on Luna');
+  });
+
+  it('a rider nobody can name still reads as her id, never blank', async () => {
+    const h = await inRound();
+    h.session().emitState(snapshot({ phase: 'results', heatIndex: 0, riders: { host: rider('host', { status: 'finished' }), cris: rider('cris', { status: 'finished' }) } }));
+    await settle();
+    expect(text(h.root.querySelector('[data-list="heat"] > li[data-id="cris"]'))).toBe('cris · 0 faults · Finished');
   });
 });
 

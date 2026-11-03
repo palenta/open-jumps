@@ -98,6 +98,12 @@ export interface RiderView {
   autopilot: boolean;
   /** Term id of the last take-off or turn caption, '' when none yet. */
   lastLabel: string;
+  /**
+   * The rider's names, here and in the class table rows, because a rider who leaves the room for good is no
+   * participant any more ('' while the server does not know them yet).
+   */
+  riderName: string;
+  ponyName: string;
 }
 
 /** LobbyState.toJSON(): maps become plain objects keyed by account id. */
@@ -148,6 +154,8 @@ export type RoundEventWire = { riderId: string } & (
 export interface ClassTableRowWire {
   place: number | null;
   riderId: string;
+  riderName: string;
+  ponyName: string;
   faults: number;
   timeMs: number | null;
   status: RiderStatus;
