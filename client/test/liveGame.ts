@@ -43,6 +43,8 @@ export interface AppUnderTest {
   received: ServerMessage[];
   /** The roomId the app connected to (from its first connect). */
   roomId(): string;
+  /** The device's own clock, the one the game reads (a finger's timeStamp is in its units, as in the browser). */
+  clock: Device['clock'];
 }
 
 export interface AppOptions {
@@ -86,7 +88,7 @@ export async function appFor(device: Device, options: AppOptions = {}): Promise<
     measure: () => ({ ...ARENA }),
   });
   await until(() => root.dataset.screen === 'home', 5000, 'the home screen');
-  return { game, root, sent, attempted, received, roomId: () => roomId };
+  return { game, root, sent, attempted, received, roomId: () => roomId, clock: device.clock };
 }
 
 export function click(root: HTMLElement, selector: string): void {
@@ -104,11 +106,17 @@ export function ring(app: AppUnderTest, code: string): void {
   form.dispatchEvent(new dom.Event('submit', { bubbles: true, cancelable: true }) as unknown as Event);
 }
 
-/** A finger on the middle of the tap zone. */
-export function tapZone(app: AppUnderTest): void {
+/**
+ * A finger on the middle of the tap zone that landed at `timeStamp` (default: now) on the device's clock. In the
+ * browser an event's timeStamp and the game's clock share one base, performance.now(); happy-dom stamps its events
+ * with its own performance.now() while the device's clock reads Date.now(), so the stamp is set as a browser would.
+ */
+export function tapZone(app: AppUnderTest, timeStamp: number = app.clock.now()): void {
   const arena = app.root.querySelector('[data-arena]');
   if (arena === null) throw new Error('no arena on screen');
-  arena.dispatchEvent(new dom.PointerEvent('pointerdown', { ...TAP_POINT, bubbles: true, cancelable: true }) as unknown as Event);
+  const event = new dom.PointerEvent('pointerdown', { ...TAP_POINT, bubbles: true, cancelable: true });
+  Object.defineProperty(event, 'timeStamp', { value: timeStamp });
+  arena.dispatchEvent(event as unknown as Event);
 }
 
 /** Text of an element with the whitespace collapsed. */

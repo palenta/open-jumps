@@ -4,7 +4,8 @@
 // connection goes away just before her approach opens, the server opens it while she is away (its 'approach'
 // broadcast never reaches her), she comes back before the take-off moment — by the SDK's own retries, or by a
 // fresh join through the Reconnect button — and her finger on the tap zone at t0 + 100 ms must go out and be judged
-// by the server as her own take-off.
+// by the server as her own take-off. And a finger the page handled too late for the judge (audit K1 r4 #1) is not a
+// take-off at the moment of its handling: nothing goes out, and her next, timely tap is the one the server judges.
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { RoomSession, type RetrySettings } from '../src/net/roomSession.js';
 import type { RoundEventWire, ServerMessage } from '../src/net/types.js';
@@ -169,6 +170,37 @@ describe('the first controlled jump after a return (audit K1 r2 #1)', () => {
     expect(takeoff?.offsetMs).not.toBeNull();
     expect(takeoff?.offsetMs ?? 0).toBeGreaterThan(40);
     expect(takeoff?.offsetMs ?? 0).toBeLessThan(250);
+    expect(['clean', 'perfect', 'chip']).toContain(takeoff?.outcome.kind);
+    app.game.destroy();
+    await ana.leave();
+  }, 40000);
+});
+
+describe('a touch the page handled too late for the judge (audit K1 r4 #1)', () => {
+  it('a correct timeStamp 1.5 s old handled at t0 + 20 ms: no tap reaches the server; her timely tap that follows is the take-off the server judges, from its own moment', async () => {
+    const { maria, app, ana } = await classWithWitness();
+    const id = maria.profile.id;
+    await until(() => roundEvents(app.received, 'approach', id).length > 0, 8000, 'her approach');
+    const approach = roundEvents(app.received, 'approach', id)[0];
+    if (!approach) throw new Error('no approach');
+    const takeoffAt = maria.clock.toClient(approach.t0);
+    if (takeoffAt === null) throw new Error('the clock is not ready');
+    await until(() => app.root.querySelector('[data-control="tap"]')?.getAttribute('data-armed') === 'true', 1500, 'the tap zone lit');
+    await sleep(Math.max(0, takeoffAt + 20 - maria.clock.now()));
+    // The finger landed 1.5 s ago; the page gets round to it only now, right at the take-off moment.
+    tapZone(app, maria.clock.now() - 1_520);
+    expect(app.attempted.filter((m) => m.type === 'tap')).toEqual([]);
+    expect(app.root.querySelector('[data-control="tap"]')?.getAttribute('data-armed')).toBe('true');
+    await sleep(Math.max(0, takeoffAt + 100 - maria.clock.now()));
+    const touch = maria.clock.now();
+    tapZone(app, touch);
+    expect(app.sent.filter((m) => m.type === 'tap')).toEqual([{ type: 'tap', clientTime: touch, fence: approach.fence, attempt: approach.attempt }]);
+    await until(() => roundEvents(app.received, 'takeoff', id).length > 0, 3000, "the server's verdict");
+    const takeoff = roundEvents(app.received, 'takeoff', id)[0];
+    expect(takeoff).toMatchObject({ fence: approach.fence, attempt: approach.attempt });
+    // Judged from the timely touch, translated as the server translates it — not from the moment the stale one was handled.
+    const expected = (maria.clock.toServer(touch) ?? Number.NaN) - approach.t0;
+    expect(Math.abs((takeoff?.offsetMs ?? Number.NaN) - expected)).toBeLessThanOrEqual(1);
     expect(['clean', 'perfect', 'chip']).toContain(takeoff?.outcome.kind);
     app.game.destroy();
     await ana.leave();

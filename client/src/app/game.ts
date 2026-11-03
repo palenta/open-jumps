@@ -106,26 +106,21 @@ export interface Game {
 
 const CONTROLS: Control[] = ['turn-left', 'turn-right', 'gear', 'tap'];
 
-export const PRESS_TIME = {
-  /**
-   * The oldest an event's timeStamp may be, against the clock at handling, to be taken as the moment of the touch.
-   * Real handler delays are far shorter (the smoke route measured 58–122 ms in headless Chromium, its longest task
-   * 420 ms); a timeStamp of another time base — epoch ms in an old engine (later than now), 0 or the document's start
-   * for a synthetic event (long before) — falls outside. A tap even 300 ms older than its arrival is refused by the
-   * server as too old (PACKET.maxAgeMs) whatever it says, so nothing older than 1 s can matter for a take-off.
-   */
-  maxEventAgeMs: 1000,
-} as const;
-
 /**
- * The moment of a press in the clock's units (audit K1 r3 #4): the event's own timeStamp — a DOMHighResTimeStamp in
- * the base of performance.now(), the clock main.ts gives ClientClock — when it is finite, not later than `now` (the
- * clock read while handling) and at most PRESS_TIME.maxEventAgeMs before it; otherwise `now`. The handler runs
- * whenever the main thread is free — 58–122 ms after the touch was measured while frames took 33–77 ms — and the
- * judge must see when the finger landed, not when the page got round to it.
+ * The moment of a press in the clock's units (audit K1 r3 #4, r4 #1): the event's own timeStamp — a
+ * DOMHighResTimeStamp in the base of performance.now(), the clock main.ts gives ClientClock — whenever it can be a
+ * moment of that clock: finite, after its origin (> 0) and not later than `now` (the clock read while handling).
+ * Otherwise the stamp is of another base or none at all — epoch ms or a system uptime in an old engine are later than
+ * now, a missing or broken one is 0, negative or not finite — and `now` is used. An old stamp is still the moment of
+ * the touch and is kept however old it is: the age of a correct stamp says the page was slow, not that its clock is
+ * another, and replacing it with the handling time would make a finger that landed long before the take-off window
+ * a fresh tap inside it. What an old press means is then the controller's business: a tap or a turn already older
+ * than the judge accepts (INPUT.maxPressAgeMs = PACKET.maxAgeMs) is not sent at all (see InputController.press). The
+ * handler runs whenever the main thread is free — 58–122 ms after the touch was measured while frames took 33–77 ms
+ * — and the judge must see when the finger landed, not when the page got round to it.
  */
 export function pressTime(timeStamp: number, now: number): number {
-  if (!Number.isFinite(timeStamp) || timeStamp > now || now - timeStamp > PRESS_TIME.maxEventAgeMs) return now;
+  if (!Number.isFinite(timeStamp) || timeStamp <= 0 || timeStamp > now) return now;
   return timeStamp;
 }
 
@@ -194,12 +189,17 @@ interface RoundModules {
  *   are drawn as [data-control="turn-left"|"turn-right"|"gear"|"tap"], absolutely positioned INSIDE the arena with
  *   style left/top/width/height in px of the layout's zones (arena-local coordinates; the arena is
  *   position: relative). [data-arena] receives pointerdown: the finger's clientX/clientY minus the rectangle's
- *   left/top is tested with hitTest → InputController.press(control, pressTime(event.timeStamp, clock.now())); a
- *   finger outside the rectangle is ignored. The time of a press is the moment of the touch (audit K1 r3 #4): the
- *   event's timeStamp (performance.now() base, the clock's own units in the browser) is the clientTime of a 'tap' or
- *   a 'turn', the moment the turn window is checked against and the moment the instant hint judges; a timeStamp that
- *   is not finite, later than clock.now(), or more than PRESS_TIME.maxEventAgeMs (1 s) before it cannot be the touch,
- *   and clock.now() at handling is used instead. [data-hud-fence], [data-hud-faults], [data-hud-time], [data-hud-gear], [data-hud-caption],
+ *   left/top is tested with hitTest → InputController.press(control, pressTime(event.timeStamp, now), now) with now
+ *   = clock.now() at handling; a finger outside the rectangle is ignored. The time of a press is the moment of the
+ *   touch (audit K1 r3 #4): the event's timeStamp (performance.now() base, the clock's own units in the browser) is
+ *   the clientTime of a 'tap' or a 'turn', the moment the turn window is checked against and the moment the instant
+ *   hint judges; a timeStamp that cannot be a moment of the clock — not finite, 0 or negative, later than
+ *   clock.now() — is another base or none, and clock.now() at handling is used instead. A correct timeStamp is never
+ *   replaced, however old (audit K1 r4 #1): a tap, or a direction press that is a turn at its moment, already more
+ *   than INPUT.maxPressAgeMs (= PACKET.maxAgeMs, 300 ms: the judge's 'too-old' limit, which no packet handled that
+ *   late can meet) before clock.now() when it is handled sends nothing, spends nothing and shows no hint — the tap
+ *   zone stays lit and the turn window open, so the next timely press goes out; the gear and a line shift carry no
+ *   time and go out whatever the age. [data-hud-fence], [data-hud-faults], [data-hud-time], [data-hud-gear], [data-hud-caption],
  *   [data-badge] (placeholder art) from hudModel; [data-rotate] is shown (hidden attribute removed) when
  *   needsRotation(rect.width, rect.height), and while it is shown every pointerdown on the arena is ignored (the
  *   hidden zones take no input). While the own horse's approach is open (from the 'approach' event
@@ -686,9 +686,11 @@ export function createGame(deps: GameDeps): Game {
     const control = hitTest(layout, x, y);
     if (control === null) return;
     // When the finger landed, not when this handler got to run (audit K1 r3 #4): the tap's and the turn's clientTime
-    // and the instant hint all read the event's own time.
-    const at = pressTime(event.timeStamp, deps.clock.now());
-    const sent = round.controller.press(control, at);
+    // and the instant hint all read the event's own time; a tap or a turn already too old for the judge when it is
+    // handled is not sent, spends nothing and shows no hint (audit K1 r4 #1).
+    const handledAt = deps.clock.now();
+    const at = pressTime(event.timeStamp, handledAt);
+    const sent = round.controller.press(control, at, handledAt);
     if (sent?.type === 'tap') {
       const hint = round.hint.tap(at);
       if (hint) round.caption = { event: { type: 'takeoff', label: hint.outcome.label, fence: hint.fence }, riderId: me?.id ?? '' };

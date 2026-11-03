@@ -4,11 +4,10 @@
 // happy-dom for the document, a scripted API, a scripted room session, a recording scene, a settable clock and
 // window — and pinned through the DOM contract in game.ts (data attributes, pointerdown on the arena, the
 // lifecycle events, the round modules re-created per class-course).
-import { caption as captionOf, type ApproachState, type CourseSpec, type TakeoffOutcome } from '@open-jumps/shared';
+import { caption as captionOf, PACKET, type ApproachState, type CourseSpec, type TakeoffOutcome } from '@open-jumps/shared';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   createGame,
-  PRESS_TIME,
   pressTime,
   type ApiLike,
   type ArenaRect,
@@ -498,10 +497,11 @@ const phaseMessage = (phase: 'walk' | 'riding' | 'results' | 'done', heatIndex: 
   endsAt,
 });
 
-/** Points (CSS px) inside the phone layout zones for 844×390: tap x 422..692 y 58..292; gear x 758..836 y 304..382; turn-left x 0..152 y 97..292. */
+/** Points (CSS px) inside the phone layout zones for 844×390: tap x 422..692 y 58..292; gear x 758..836 y 304..382; turn-left x 0..152 y 97..292; turn-right x 692..844 y 97..292. */
 const TAP: [number, number] = [500, 150];
 const GEAR: [number, number] = [800, 345];
 const TURN_LEFT: [number, number] = [10, 195];
+const TURN_RIGHT: [number, number] = [830, 195];
 
 // ---- the harness -------------------------------------------------------------------------------------------
 
@@ -1636,15 +1636,14 @@ describe('the moment of a press is the moment of the touch, not of its handling 
     expect(h.session().sentOf('line')).toEqual([]);
   });
 
-  it('a timeStamp that cannot be the touch falls back to the clock at handling: later than now, more than 1 s before it, not finite', async () => {
-    for (const stamp of [Number.NaN, Number.POSITIVE_INFINITY, 1_700_000_000_000, 0]) {
+  it('a timeStamp that cannot be a moment of this clock falls back to the clock at handling: not finite, later than now, at or before its origin', async () => {
+    for (const stamp of [Number.NaN, Number.POSITIVE_INFINITY, 1_700_000_000_000, 0, -5]) {
       const h = await inRound();
       const t0 = h.clock.now() + 1_000;
       approachOwn(h, 1, 1, t0);
       h.clock.t = t0 + 10;
-      const bogus = stamp === 0 ? h.clock.now() - PRESS_TIME.maxEventAgeMs - 1 : stamp;
-      press(h, TAP, bogus);
-      expect(h.session().sentOf('tap'), String(bogus)).toEqual([{ type: 'tap', clientTime: t0 + 10, fence: 1, attempt: 1 }]);
+      press(h, TAP, stamp);
+      expect(h.session().sentOf('tap'), String(stamp)).toEqual([{ type: 'tap', clientTime: t0 + 10, fence: 1, attempt: 1 }]);
       h.game.frame(h.clock.now());
       expect(text(h.root.querySelector('[data-hud-caption]'))).toBe('Dakota: perfecta at fence 1!');
       h.game.destroy();
@@ -1660,15 +1659,76 @@ describe('the moment of a press is the moment of the touch, not of its handling 
     expect(h.session().sentOf('line')).toEqual([{ type: 'line', line: 'angle' }]);
   });
 
-  it('pressTime: the event time when it is finite, not later than now and at most PRESS_TIME.maxEventAgeMs before it; otherwise now', () => {
-    expect(PRESS_TIME).toEqual({ maxEventAgeMs: 1000 });
+  it('pressTime: the event time when it is a moment of the clock (finite, after its origin, not later than now), however old; otherwise now', () => {
     expect(pressTime(9_880, 10_000)).toBe(9_880);
     expect(pressTime(10_000, 10_000)).toBe(10_000);
     expect(pressTime(9_000, 10_000)).toBe(9_000);
-    expect(pressTime(8_999, 10_000)).toBe(10_000);
+    expect(pressTime(8_500, 10_000)).toBe(8_500); // old, but the touch: never replaced by the handling (audit K1 r4 #1)
+    expect(pressTime(1, 10_000)).toBe(1);
     expect(pressTime(10_001, 10_000)).toBe(10_000);
+    expect(pressTime(0, 10_000)).toBe(10_000);
+    expect(pressTime(-5, 10_000)).toBe(10_000);
     expect(pressTime(Number.NaN, 10_000)).toBe(10_000);
     expect(pressTime(Number.NEGATIVE_INFINITY, 10_000)).toBe(10_000);
+  });
+});
+
+describe('a touch too old for the judge when it is handled is not sent (audit K1 r4 #1)', () => {
+  const caption = (h: Harness): string => text(h.root.querySelector('[data-hud-caption]'));
+  const armed = (h: Harness): string | null => q(h.root, '[data-control="tap"]').getAttribute('data-armed');
+
+  it('t0 = 10 s on the clock: a touch at 8.5 s handled at 10.02 s sends no tap and shows no hint; the timely tap that follows goes out with its own time and is the perfecta', async () => {
+    for (const touchAge of [1_520, PACKET.maxAgeMs + 1]) {
+      const h = await inRound();
+      const t0 = h.clock.now() + 1_000;
+      approachOwn(h, 1, 1, t0);
+      h.game.frame(h.clock.now());
+      const before = caption(h);
+      h.clock.t = t0 + 20; // the main thread was busy: the handler runs long after the finger landed
+      press(h, TAP, h.clock.now() - touchAge);
+      expect(h.session().sentOf('tap'), String(touchAge)).toEqual([]);
+      h.game.frame(h.clock.now());
+      expect(caption(h)).toBe(before);
+      expect(armed(h)).toBe('true'); // nothing was spent: the zone is still lit for this attempt
+      h.clock.t = t0 + 40;
+      press(h, TAP, t0 + 30);
+      expect(h.session().sentOf('tap')).toEqual([{ type: 'tap', clientTime: t0 + 30, fence: 1, attempt: 1 }]);
+      h.game.frame(h.clock.now());
+      expect(caption(h)).toBe('Dakota: perfecta at fence 1!');
+      h.game.destroy();
+    }
+  });
+
+  it('a touch exactly PACKET.maxAgeMs old when handled still goes out, with the moment of the touch', async () => {
+    const h = await inRound();
+    const t0 = h.clock.now() + 1_000;
+    approachOwn(h, 1, 1, t0);
+    h.clock.t = t0 + 20 + PACKET.maxAgeMs;
+    press(h, TAP, t0 + 20);
+    expect(h.session().sentOf('tap')).toEqual([{ type: 'tap', clientTime: t0 + 20, fence: 1, attempt: 1 }]);
+  });
+
+  it('a turn press too old for the judge sends neither a turn nor a line shift, and the timely press is still the turn', async () => {
+    const h = await inRound();
+    h.session().emitMessage(roundEvent({ type: 'turn-ahead', riderId: 'host', distanceM: 45, at: h.clock.now() }));
+    const touch = h.clock.now() + 1_000;
+    h.clock.t = touch + PACKET.maxAgeMs + 1;
+    press(h, TURN_LEFT, touch);
+    expect(h.session().sentOf('turn')).toEqual([]);
+    expect(h.session().sentOf('line')).toEqual([]);
+    h.clock.t += 20;
+    press(h, TURN_RIGHT, h.clock.now() - 10);
+    expect(h.session().sentOf('turn')).toEqual([{ type: 'turn', choice: 'right', clientTime: h.clock.now() - 10 }]);
+    expect(h.session().sentOf('line')).toEqual([]);
+  });
+
+  it('the gear and a line shift carry no time: an old touch on them still goes out', async () => {
+    const h = await inRound();
+    h.clock.t += 5_000;
+    press(h, GEAR, h.clock.now() - 2_000);
+    press(h, TURN_LEFT, h.clock.now() - 2_000);
+    expect(h.session().sentOf('gear')).toEqual([{ type: 'gear', gear: 'extended' }]);
+    expect(h.session().sentOf('line')).toEqual([{ type: 'line', line: 'angle' }]);
   });
 });
 

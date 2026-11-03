@@ -3,6 +3,7 @@
 // a press outside an open approach is nothing — it neither goes out nor spends the next attempt's tap); 'left' /
 // 'right' are a turn inside a turn window and a line shift outside it; the pace button cycles the gear. Nothing
 // is sent when the rider is not riding.
+import { PACKET } from '@open-jumps/shared';
 import { describe, expect, it } from 'vitest';
 import { INPUT, InputController, type RiderInputState } from '../src/input/controller.js';
 import type { Control } from '../src/input/layout.js';
@@ -37,8 +38,9 @@ function armedController(): { input: InputController; sent: ClientRoomMessage[] 
 }
 
 describe('INPUT', () => {
-  it('a 3.5 s turn window and the gear order collected → extended → gallop', () => {
-    expect(INPUT).toEqual({ turnWindowMs: 3500, gearOrder: ['collected', 'extended', 'gallop'] });
+  it('a 3.5 s turn window, the gear order collected → extended → gallop, and a timed press as old as the judge accepts', () => {
+    expect(INPUT).toEqual({ turnWindowMs: 3500, gearOrder: ['collected', 'extended', 'gallop'], maxPressAgeMs: 300 });
+    expect(INPUT.maxPressAgeMs).toBe(PACKET.maxAgeMs);
   });
 });
 
@@ -404,6 +406,49 @@ describe('InputController when the session cannot send (audit K1 r3 #1)', () => 
     expect(sent).toEqual([
       { type: 'turn', choice: 'right', clientTime: 5200 },
       { type: 'gear', gear: 'extended' },
+    ]);
+  });
+});
+
+describe('InputController presses too old for the judge (audit K1 r4 #1)', () => {
+  it('a tap whose moment is more than INPUT.maxPressAgeMs before its handling is null, sends nothing and spends nothing: the next timely tap goes out', () => {
+    for (const ageMs of [INPUT.maxPressAgeMs + 1, 1_520]) {
+      const { input, sent } = armedController();
+      expect(input.press('tap', 10_020 - ageMs, 10_020), String(ageMs)).toBeNull();
+      expect(sent).toEqual([]);
+      expect(input.armed).toBe(true);
+      expect(input.press('tap', 10_030, 10_040)).toEqual({ type: 'tap', clientTime: 10_030, fence: 1, attempt: 1 });
+      expect(sent).toEqual([{ type: 'tap', clientTime: 10_030, fence: 1, attempt: 1 }]);
+      expect(input.armed).toBe(false);
+    }
+  });
+
+  it('a tap exactly INPUT.maxPressAgeMs old at handling still goes out with its own moment', () => {
+    const { input, sent } = armedController();
+    expect(input.press('tap', 10_000 - INPUT.maxPressAgeMs, 10_000)).toEqual({ type: 'tap', clientTime: 10_000 - INPUT.maxPressAgeMs, fence: 1, attempt: 1 });
+    expect(sent).toHaveLength(1);
+  });
+
+  it('a turn press too old for the judge is null — neither a turn nor a line shift — and the window stays open for the timely press', () => {
+    const { input, sent } = ridingController();
+    input.turnAhead(7_000);
+    expect(input.press('turn-left', 7_100, 7_100 + INPUT.maxPressAgeMs + 1)).toBeNull();
+    expect(sent).toEqual([]);
+    expect(input.requestedLine).toBe('center');
+    expect(input.press('turn-right', 7_500, 7_520)).toEqual({ type: 'turn', choice: 'right', clientTime: 7_500 });
+  });
+
+  it('the gear and a line shift carry no time: an old press on them still goes out', () => {
+    const { input, sent } = ridingController();
+    expect(input.press('gear', 5_000, 6_500)).toEqual({ type: 'gear', gear: 'extended' });
+    expect(input.press('turn-left', 5_000, 6_500)).toEqual({ type: 'line', line: 'angle' });
+    // A direction press after the window closed is a line shift at its moment, however late it is handled.
+    input.turnAhead(8_000);
+    expect(input.press('turn-right', 8_000 + INPUT.turnWindowMs, 8_000 + INPUT.turnWindowMs + 1_000)).toEqual({ type: 'line', line: 'center' });
+    expect(sent).toEqual([
+      { type: 'gear', gear: 'extended' },
+      { type: 'line', line: 'angle' },
+      { type: 'line', line: 'center' },
     ]);
   });
 });

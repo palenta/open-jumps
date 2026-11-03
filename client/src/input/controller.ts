@@ -5,8 +5,9 @@
 // next fence from the decision on, 600 ms before the horse even lands); a client that takes control back after a
 // drop is told the approach in progress by the server's 'approach-sync' instead (audit K1 r2 #1), and an attempt
 // whose tap already went out is never armed twice; 'left' / 'right' are a turn while a turn window is open,
-// otherwise a line shift; the pace button cycles the gear.
-import type { Gear } from '@open-jumps/shared';
+// otherwise a line shift; the pace button cycles the gear. A timed press (the tap, a turn) handled too late for the
+// judge to accept is not sent at all (audit K1 r4 #1).
+import { PACKET, type Gear } from '@open-jumps/shared';
 import type { Control } from './layout.js';
 import type { ClientRoomMessage } from '../net/types.js';
 
@@ -14,6 +15,14 @@ export const INPUT = {
   /** How long after a 'turn-ahead' the direction buttons mean a turn (zone 10 m ≈ 2 s before the turn moment, plus the late window). */
   turnWindowMs: 3500,
   gearOrder: ['collected', 'extended', 'gallop'] as const,
+  /**
+   * The oldest a timed press (the tap, a turn) may be when it is handled, against the clock read at handling: the
+   * judge's own limit, PACKET.maxAgeMs. The server refuses a tap or a turn whose receive time is more than that after
+   * its action time ('too-old'), and the packet arrives at least as late as it is handled — so a press already older
+   * at handling is refused whatever the network (short of an error of the clock measurement itself in its favour,
+   * which would have to outweigh the whole transit), and sending it would only spend the attempt or the turn.
+   */
+  maxPressAgeMs: PACKET.maxAgeMs,
 } as const;
 
 export interface RiderInputState {
@@ -53,9 +62,16 @@ export interface InputControllerDeps {
  *   (and remembered as the last tap), the turn window closed, the gear or line switched. A press while the session
  *   cannot send (dropped, connecting) changes nothing, so the tap of an approach still open after the SDK recovered
  *   goes out on the next press — and a second press after a tap that really went out still sends nothing.
- * - press(control, clientTime): the message sent, or null when nothing was (not riding; a tap with no approach open
- *   or a second tap in the same approach; an unknown control; the session could not send). clientTime is the
- *   ClientClock reading of the pointer-down (the game passes the event's own time, see game.ts).
+ * - press(control, clientTime, handledAt = clientTime): the message sent, or null when nothing was (not riding; a
+ *   tap with no approach open or a second tap in the same approach; a timed press too old for the judge; an unknown
+ *   control; the session could not send). clientTime is the ClientClock reading of the pointer-down (the game
+ *   passes the event's own time, see game.ts); handledAt is the clock read while the press is handled.
+ * - A timed press too old for the judge is nothing (audit K1 r4 #1): a tap, or a direction press that is a turn at
+ *   its moment, with handledAt − clientTime > INPUT.maxPressAgeMs is null, sends nothing and spends nothing — the
+ *   tap of the approach stays armed and the turn window stays open, so the next timely press still goes out. Such
+ *   a press is never re-timed to handledAt: that would turn a finger that landed before the window into a fresh
+ *   take-off or turn. The gear and the line carry no time and go out whatever the age of the press; whether a
+ *   direction press is a turn or a line shift is decided at its own moment (clientTime), not at its handling.
  * - turnAhead() opens the turn window for turnWindowMs (or until turnTaken()); a 'turn-left'/'turn-right' press
  *   inside it sends {type:'turn', choice, clientTime} and closes the window; outside it sends a line toggle
  *   {type:'line', line} (center ↔ angle); the gear press sends the next gear of INPUT.gearOrder (cyclic),
@@ -116,11 +132,13 @@ export class InputController {
     this.turnWindowUntil = null;
   }
 
-  press(control: Control, clientTime: number): ClientRoomMessage | null {
+  press(control: Control, clientTime: number, handledAt: number = clientTime): ClientRoomMessage | null {
     const state = this.state;
     if (state === null || !state.riding) return null;
     const message = this.messageFor(control, clientTime);
     if (message === null) return null;
+    // A timed press already older than the judge accepts is not a take-off or a turn of now (audit K1 r4 #1).
+    if ((message.type === 'tap' || message.type === 'turn') && handledAt - clientTime > INPUT.maxPressAgeMs) return null;
     // Nothing is spent unless the message really went out (audit K1 r3 #1).
     if (!this.send(message)) return null;
     switch (message.type) {
