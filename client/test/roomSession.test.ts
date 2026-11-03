@@ -11,6 +11,8 @@ import { bootApp, LIVE_COURSE, newDevice, sleep, TIMING, until, type Device, typ
 
 /** An application close code that is a plain drop to the server (anything but consented 4000, kicked 4100, revoked 4101). */
 const DROP_CODE = 4005;
+/** A close the SDK treats as a drop it may recover from by itself (GOING_AWAY). */
+const RETRIABLE_DROP_CODE = 1001;
 
 let live: LiveApp;
 
@@ -30,9 +32,12 @@ interface Seat {
   states: number;
 }
 
-/** Connect a device to a room, recording every message, status change and state patch. */
+/**
+ * Connect a device to a room, recording every message, status change and state patch. With the SDK's retries on,
+ * they start at once (the SDK's 5 s minimum uptime is waived) and give up after three tries.
+ */
 async function sit(device: Device, roomId: string, code: string, autoReconnect = true): Promise<Seat> {
-  const session = new RoomSession({ sdk: device.sdk(), clock: device.clock, autoReconnect });
+  const session = new RoomSession({ sdk: device.sdk(), clock: device.clock, autoReconnect, retry: { minUptime: 0, maxRetries: 3 } });
   const seat: Seat = { device, session, messages: [], statuses: [], states: 0 };
   session.onMessage((m) => seat.messages.push(m));
   session.onStatus((s) => seat.statuses.push(s));
@@ -180,11 +185,58 @@ describe('RoomSession', () => {
    * The network goes away under the client (a locked phone): the server closes the socket with a code that is
    * NOT a consented leave (Colyseus's CloseCode.CONSENTED is 4000 — that one would mean "she left on purpose").
    */
-  function dropFromServer(roomId: string): void {
+  function dropFromServer(roomId: string, code = DROP_CODE): void {
     const serverRoom = matchMaker.getLocalRoomById(roomId);
     expect(serverRoom.clients).toHaveLength(1);
-    serverRoom.clients[0]?.leave(DROP_CODE);
+    serverRoom.clients[0]?.leave(code);
   }
+
+  /** The reconnection token the server holds for the one connected client of the room, in the SDK's `roomId:token` form. */
+  function tokenOnServer(roomId: string): string {
+    const serverRoom = matchMaker.getLocalRoomById(roomId);
+    expect(serverRoom.clients).toHaveLength(1);
+    return `${roomId}:${serverRoom.clients[0]?.reconnectionToken ?? ''}`;
+  }
+
+  it('with the SDK retrying by itself: a drop in the lobby starts the retries; the tab returns during them (resume() is false); the server has no seat, the retries fail, and the session ends as lost instead of staying dropped for good (audit K1 r1 #4)', async () => {
+    const host = await newDevice(live, 'AutoLobbyDrop');
+    const { code, roomId } = await openRoom(host);
+    const seat = await sit(host, roomId, code, true);
+    dropFromServer(roomId, RETRIABLE_DROP_CODE);
+    await until(() => seat.session.status === 'dropped', 5000, 'the drop');
+    expect(await seat.session.resume()).toBe(false); // visibilitychange while the SDK is retrying: it is on it
+    expect(seat.session.status).toBe('dropped');
+    await until(() => seat.session.status === 'ended', 10_000, 'the end of the retries');
+    expect(seat.session.end?.kind).toBe('lost');
+    expect(seat.statuses).toEqual(['connecting', 'connected', 'dropped', 'ended']);
+    expect(await seat.session.resume()).toBe(false);
+    // The way back is a fresh session: the doorbell still knows her.
+    const again = await sit(host, roomId, code);
+    expect(again.session.status).toBe('connected');
+    await again.session.leave();
+  }, 25000);
+
+  it('with the SDK retrying by itself while riding: two drops are each recovered by the SDK alone, and after each one the session\'s token is the one the server holds now, not the spent one (audit K1 r1 #10)', async () => {
+    const { host, seat, roomId } = await ridingAlone(true);
+    const first = seat.session.reconnectionToken;
+    expect(first).toBe(tokenOnServer(roomId));
+    for (const expectedStatuses of [
+      ['connecting', 'connected', 'dropped', 'connected'],
+      ['connecting', 'connected', 'dropped', 'connected', 'dropped', 'connected'],
+    ]) {
+      const before = seat.session.reconnectionToken;
+      dropFromServer(roomId, RETRIABLE_DROP_CODE);
+      await until(() => seat.session.status === 'dropped', 5000, 'the drop');
+      await until(() => seat.session.status === 'connected', 10_000, 'the SDK reconnecting by itself');
+      expect(seat.statuses).toEqual(expectedStatuses);
+      await until(() => matchMaker.getLocalRoomById(roomId).clients.length === 1, 2000, 'one client on the server');
+      expect(seat.session.reconnectionToken).toBe(tokenOnServer(roomId));
+      expect(seat.session.reconnectionToken).not.toBe(before);
+    }
+    await until(() => seat.session.state?.riders[host.profile.id]?.autopilot === false, 5000, 'autopilot off after the return');
+    expect(seat.session.end).toBeNull();
+    await seat.session.leave();
+  }, 30000);
 
   it('in the lobby a drop has no seat to come back to (the server keeps seats only during a heat): resume() is false, the session ends as lost, and a fresh connect gets the rider back in', async () => {
     const host = await newDevice(live, 'LobbyDrop');

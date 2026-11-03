@@ -1,19 +1,31 @@
 // The live room from the client's side (plan 2.2, 2.3): joinById with the roomId the doorbell handed out, the
 // state as plain snapshots, every server message typed, clock pings answered from the ClientClock, and the
-// reconnection path for Safari's silent socket drops on screen lock — the SDK retries by itself while the tab
-// lives; when it has given up (or auto-reconnection is off), resume() reconnects by the reconnection token
-// on visibilitychange / pageshow.
+// reconnection path for Safari's silent socket drops on screen lock — with the SDK's own retries on, the SDK
+// reconnects by itself while the tab lives and the session reports the outcome (connected again, or lost for good
+// once the retries are exhausted); with them off, resume() reconnects by the reconnection token on
+// visibilitychange / pageshow.
 import type { CourseSpec } from '@open-jumps/shared';
 import type { ClientClock } from './clientClock.js';
 import { KICKED_CLOSE_CODE, SESSION_REVOKED_CLOSE_CODE, type ClientRoomMessage, type LobbyStateSnapshot, type ServerMessage } from './types.js';
+
+/** The SDK's retry settings the session may override (tests shorten them; production keeps the SDK's defaults). */
+export interface RetrySettings {
+  /** How long the room must have been up before the SDK retries at all (SDK default 5000 ms). */
+  minUptime?: number;
+  maxRetries?: number;
+  delay?: number;
+  minDelay?: number;
+  maxDelay?: number;
+}
 
 /** The slice of a Colyseus SDK Room the session uses (ColyseusSDK's Room satisfies it). */
 export interface RoomLike {
   roomId: string;
   sessionId: string;
+  /** The SDK renews it on every (re)connection — AFTER its onReconnect callback has returned (0.18.9). */
   reconnectionToken: string;
   state: unknown;
-  reconnection: { enabled: boolean; isReconnecting?: boolean };
+  reconnection: { enabled: boolean; isReconnecting?: boolean } & RetrySettings;
   onStateChange(callback: (state: unknown) => void): unknown;
   onMessage(type: '*', callback: (type: string | number, payload: unknown) => void): unknown;
   onLeave(callback: (code: number, reason?: string) => void): unknown;
@@ -39,6 +51,8 @@ export interface RoomSessionDeps {
   clock: ClientClock;
   /** The SDK's own retry loop on a drop (default true); off, a drop waits for resume(). */
   autoReconnect?: boolean;
+  /** Overrides of the SDK's retry settings (tests only; production keeps the SDK's defaults). */
+  retry?: RetrySettings;
 }
 
 /** How long the first full state may take after the join resolved. */
@@ -51,22 +65,29 @@ const FIRST_STATE_TIMEOUT_MS = 5000;
  * - state: the latest snapshot (state.toJSON()); onState fires after every patch.
  * - Messages reach onMessage listeners as ServerMessage ('round-event' carries the event under `event`);
  *   'class-course' is also remembered as course().
- * - A leave code 4100 → ended 'kicked', 4101 → 'revoked', a consented leave → 'left'; any other close is a
- *   drop: status 'dropped' (the SDK keeps retrying when autoReconnect; a successful retry → 'connected').
- * - resume(): when dropped and the SDK is not retrying, reconnect by token; resolves true when connected
- *   afterwards (also when it already was), false when the server refused (then the session ends as 'lost').
+ * - A leave code 4100 → ended 'kicked', 4101 → 'revoked', a consented leave → 'left'. Any other close: with the
+ *   SDK's retries ON, the SDK's onDrop makes the status 'dropped' and the SDK retries by itself — a successful
+ *   retry → 'connected', and the final onLeave once the retries are exhausted (or refused at once: uptime too
+ *   short, a server close the SDK never retries) ends the session as 'lost' (audit K1 r1 #4: never a 'dropped'
+ *   that nothing will ever change); with them OFF the close is a drop: status 'dropped', waiting for resume().
+ * - resume(): when dropped and the SDK is not retrying, reconnect by the room's CURRENT token; resolves true when
+ *   connected afterwards (also when it already was), false when the server refused (then the session ends as
+ *   'lost') or when the SDK is still retrying (its outcome comes as the next status).
+ * - reconnectionToken: always the room's current one — the SDK renews it on every reconnection, right after its
+ *   onReconnect callback, so the stored copy is refreshed a microtask later too (audit K1 r1 #10).
  * - send() while dropped is dropped silently (a rider command is useless late; the server has autopilot).
  */
 export class RoomSession {
   private readonly sdk: SdkLike;
   private readonly clock: ClientClock;
   private readonly autoReconnect: boolean;
+  private readonly retry: RetrySettings;
   private room: RoomLike | null = null;
   private snapshot: LobbyStateSnapshot | null = null;
   private currentStatus: SessionStatus = 'idle';
   private currentEnd: SessionEnd | null = null;
   private currentCourse: CourseSpec | null = null;
-  /** The token of the last connection, kept through a drop for resume(). */
+  /** The token of the last connection as last seen (the room's own field is the live value), kept through a drop for resume(). */
   private token: string | null = null;
   /** True while leave() runs, so the close it causes reads as 'left'. */
   private leaving = false;
@@ -78,6 +99,7 @@ export class RoomSession {
     this.sdk = deps.sdk;
     this.clock = deps.clock;
     this.autoReconnect = deps.autoReconnect ?? true;
+    this.retry = deps.retry ?? {};
   }
 
   async connect(roomId: string, code: string): Promise<void> {
@@ -94,12 +116,13 @@ export class RoomSession {
 
   async resume(): Promise<boolean> {
     if (this.currentStatus === 'connected') return true;
-    if (this.currentStatus !== 'dropped' || this.token === null) return false;
+    const token = this.currentToken();
+    if (this.currentStatus !== 'dropped' || token === null) return false;
     if (this.room?.reconnection.isReconnecting) return false; // the SDK is still on it; the next status says
     this.setStatus('connecting');
     let room: RoomLike;
     try {
-      room = await this.sdk.reconnect(this.token);
+      room = await this.sdk.reconnect(token);
     } catch {
       this.finish({ kind: 'lost', code: 0 });
       return false;
@@ -144,7 +167,12 @@ export class RoomSession {
 
   /** The reconnection token of the current connection (persisted by the app for a reload), null when none. */
   get reconnectionToken(): string | null {
-    return this.token;
+    return this.currentToken();
+  }
+
+  /** The room's own token is the live value: the SDK renews it on every reconnection. */
+  private currentToken(): string | null {
+    return this.room?.reconnectionToken ?? this.token;
   }
 
   course(): CourseSpec | null {
@@ -173,6 +201,7 @@ export class RoomSession {
     this.room = room;
     this.token = room.reconnectionToken;
     room.reconnection.enabled = this.autoReconnect;
+    Object.assign(room.reconnection, this.retry);
     const firstState = new Promise<void>((resolve, reject) => {
       const timer = setTimeout(() => reject(new Error('no room state arrived')), FIRST_STATE_TIMEOUT_MS);
       room.onStateChange((state) => {
@@ -191,16 +220,24 @@ export class RoomSession {
       if (this.room === room && this.currentStatus === 'connected') this.setStatus('dropped');
     });
     room.onReconnect(() => {
-      if (this.room === room) {
-        this.token = room.reconnectionToken;
-        this.setStatus('connected');
-      }
+      if (this.room !== room) return;
+      this.setStatus('connected');
+      // SDK 0.18.9 assigns the renewed token right AFTER this callback returns: the stored copy is refreshed a
+      // microtask later (reads in between go to the room's own field, which is always the live value).
+      queueMicrotask(() => {
+        if (this.room === room) this.token = room.reconnectionToken;
+      });
     });
     room.onLeave((code) => {
       if (this.room !== room || this.currentStatus === 'ended') return;
       if (code === KICKED_CLOSE_CODE) this.finish({ kind: 'kicked', code });
       else if (code === SESSION_REVOKED_CLOSE_CODE) this.finish({ kind: 'revoked', code });
       else if (this.leaving) this.finish({ kind: 'left', code });
+      // With the SDK's retries on, onLeave is final: the retries are exhausted (FAILED_TO_RECONNECT), or the SDK
+      // never started them (uptime too short, a server close it does not retry) — nothing in this session will
+      // bring the room back, so the app must be told to connect afresh. With them off, the close is a drop and
+      // resume() may still reconnect by the token.
+      else if (this.autoReconnect) this.finish({ kind: 'lost', code });
       else this.setStatus('dropped');
     });
     const current = toSnapshot(room.state);
