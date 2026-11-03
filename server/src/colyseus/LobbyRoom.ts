@@ -21,7 +21,7 @@ import { ClassFlow, CLASS_TIMING, type ClassEvent } from '../round/classFlow.js'
 import { ClockSync } from '../round/clockSync.js';
 import { OUTBOX, ResultOutbox } from '../round/resultOutbox.js';
 import { RUN } from '../round/courseRunner.js';
-import type { RoundResult } from '../round/roundEngine.js';
+import type { RoundResult, RoundSnapshot } from '../round/roundEngine.js';
 
 export interface LobbyRoomDeps {
   sessions: SessionService;
@@ -66,6 +66,10 @@ export interface LobbyRoomDeps {
  *   connection. A kick or a session revocation while a reconnection is pending rejects it (the old token is dead,
  *   B1 checks are never bypassed). A consented leave withdraws the rider (eliminated 'disconnected'); the heat goes
  *   on, also with no client connected at all.
+ * - The tick that ends a heat publishes the heat's final snapshot (ClassFlow.finalSnapshot) into `riders` in the
+ *   same patch that says 'results': every rider of the heat finished or eliminated, with the faults of the results
+ *   (time faults included), never the values of the tick before (audit K1 r2 #2). `riders` keeps them through the
+ *   results phase; the next heat's 'riding' replaces them.
  * - When a heat ends, every result is written with results.insertOnce; the class table is sent as 'class-table'
  *   { table } to everyone when the class is done, and to any client that joins while the class is already done.
  *   A client joining during a class gets 'class-course', then 'class-phase' for the phase in progress (with its
@@ -594,6 +598,11 @@ export class LobbyRoom extends Room<{ state: LobbyState }> {
         }
       }
       if (event.phase === 'results') {
+        // The heat ended in this very tick — its last finish or elimination came after the previous syncRiders, and
+        // flow.engine() is null from here — so its final values are published now, in the same patch as the phase:
+        // the heat screen never shows the last rider still riding or without her time faults (audit K1 r2 #2).
+        const final = flow.finalSnapshot(event.heatIndex);
+        if (final !== null) this.publishRiders(final);
         this.heatRiders = new Set();
         this.recordResults(flow.results().filter((r) => r.roundId === `${this.classId}#${event.heatIndex}`));
       }
@@ -609,8 +618,11 @@ export class LobbyRoom extends Room<{ state: LobbyState }> {
 
   private syncRiders(flow: ClassFlow): void {
     const engine = flow.engine();
-    if (!engine) return;
-    const snapshot = engine.snapshot();
+    if (engine) this.publishRiders(engine.snapshot());
+  }
+
+  /** Mirror a heat snapshot (the running one, or the final one of a heat that just ended) into the state's riders. */
+  private publishRiders(snapshot: RoundSnapshot): void {
     if (this.state.roundClockMs !== snapshot.elapsedMs) this.state.roundClockMs = snapshot.elapsedMs;
     for (const rider of snapshot.riders) {
       const view = this.state.riders.get(rider.riderId);

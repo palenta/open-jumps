@@ -183,8 +183,9 @@ interface RoundModules {
  *   (resultsModel), [data-action="again"] (host only; sends start-class) and [data-action="leave"]. Before it —
  *   between the heats ('results') and in the moment before the table lands ('done', also for a late joiner who gets
  *   class-course first) — the heat that just ended as [data-heat-done] + [data-list="heat"] > li[data-id]
- *   (heatResultsModel of the state's riders), [data-waiting] with the next step, and [data-action="leave"]
- *   (audit K1 r1 #2: never an empty page).
+ *   (heatResultsModel of the state's riders — the heat's final values, which the room publishes in the patch that
+ *   says 'results', audit K1 r2 #2), [data-waiting] with the next step, and [data-action="leave"] (audit K1 r1 #2:
+ *   never an empty page).
  * - Lifecycle: document 'visibilitychange' (visible) and window 'pageshow' → session.resume(); window 'resize' →
  *   resize(). destroy() removes the listeners, leaves the session and disposes the scene.
  * - Captions use the participants' names from the state; the pony's gender is known only for the own rider

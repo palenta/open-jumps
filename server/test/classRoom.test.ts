@@ -909,3 +909,60 @@ describe('audit K1 r2 #1: a rider who takes control back is told the approach in
     await hostSeat.client.leave();
   }, 30000);
 });
+
+describe('audit K1 r2 #2: the state the results phase arrives with carries the final values of the heat', () => {
+  /** The first room state a client receives in phase 'results' (the heat screen is drawn from it), as plain JSON. */
+  function firstResultsState(seat: Seat): () => { riders: Record<string, { status: string; faults: number }> } | null {
+    let captured: { riders: Record<string, { status: string; faults: number }> } | null = null;
+    seat.client.onStateChange((state) => {
+      if (captured === null && state.phase === 'results') captured = state.toJSON() as unknown as typeof captured;
+    });
+    return () => captured;
+  }
+
+  /** The heat's rows as written from the engine's results (once the outbox has written them). */
+  async function engineRows(roundId: string, count: number) {
+    await until(async () => (await services.repos.results.listByRound(roundId)).length === count, 5000, 'the rows of the heat');
+    return services.repos.results.listByRound(roundId);
+  }
+
+  it('the last rider crosses the line with a time fault: at the results boundary the state already says finished with the chip and the time fault, as the engine\'s results', async () => {
+    const { entry, room, riders, roundId } = await openRoom(2);
+    const [host, friend] = riders as [Rider, Rider];
+    const hostSeat = await sit(room.roomId, entry.code, host.token, host.account.id);
+    const friendSeat = await sit(room.roomId, entry.code, friend.token, friend.account.id);
+    const atResults = firstResultsState(hostSeat);
+    await clocksSynced();
+    await startRiding(hostSeat);
+    // The host in extended canter is done at ≈ 8.5 s; the friend, passive in collected canter, is the last at the
+    // line at 10.1 s: a chip (4) and one time fault over the 10 s allowed.
+    hostSeat.client.send('room', { type: 'gear', gear: 'extended' });
+    await until(() => atResults() !== null, 20000, "the first state of phase 'results'");
+    const rows = await engineRows(roundId(0), 2);
+    expect(rows.find((r) => r.accountId === friend.account.id)).toMatchObject({ status: 'finished', faults: 5 });
+    const published = atResults()?.riders ?? {};
+    for (const row of rows) expect(published[row.accountId], row.accountId).toMatchObject({ status: row.status, faults: row.faults });
+    await friendSeat.client.leave();
+    await hostSeat.client.leave();
+  }, 40000);
+
+  it('the last rider is withdrawn (leaves for good) after the others are done: at the results boundary the state already says eliminated, as the engine\'s results', async () => {
+    const { entry, room, riders, roundId } = await openRoom(2);
+    const [host, friend] = riders as [Rider, Rider];
+    const hostSeat = await sit(room.roomId, entry.code, host.token, host.account.id);
+    const friendSeat = await sit(room.roomId, entry.code, friend.token, friend.account.id);
+    const atResults = firstResultsState(hostSeat);
+    await clocksSynced();
+    await startRiding(hostSeat);
+    hostSeat.client.send('room', { type: 'gear', gear: 'extended' });
+    await until(() => hostSeat.client.state.riders.get(host.account.id)?.status === 'finished', 15000, 'the host at the line');
+    expect(hostSeat.client.state.riders.get(friend.account.id)?.status).toBe('riding');
+    await friendSeat.client.leave(); // consented: out of the heat now, and the heat ends with her
+    await until(() => atResults() !== null, 5000, "the first state of phase 'results'");
+    const rows = await engineRows(roundId(0), 2);
+    expect(rows.find((r) => r.accountId === friend.account.id)).toMatchObject({ status: 'eliminated', eliminationReason: 'disconnected' });
+    const published = atResults()?.riders ?? {};
+    for (const row of rows) expect(published[row.accountId], row.accountId).toMatchObject({ status: row.status, faults: row.faults });
+    await hostSeat.client.leave();
+  }, 40000);
+});

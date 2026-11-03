@@ -2,7 +2,7 @@
 // ridden, then one class table grouped by height class. Pure: driven by tick(now).
 import type { AssistSettings, CourseSpec, EliminationReason, HeatOrder, HeightClass, RiderStatus, RoundMode } from '@open-jumps/shared';
 import { HeatSchedule } from '../rooms/heatSchedule.js';
-import { RoundEngine, type RiderCommand, type RoundEvent, type RoundResult } from './roundEngine.js';
+import { RoundEngine, type RiderCommand, type RoundEvent, type RoundResult, type RoundSnapshot } from './roundEngine.js';
 
 export const CLASS_TIMING = {
   /** Course walk (reconocimiento): club tier 10 s, upper tiers 20 s. */
@@ -99,6 +99,8 @@ export class ClassFlow {
   private phaseAt: number | null = null;
   private running: RoundEngine | null = null;
   private readonly finished: RoundResult[] = [];
+  /** The last snapshot of every finished heat, by heat index (the riders as the heat ended). */
+  private readonly finals = new Map<number, RoundSnapshot>();
   private pending: ClassEvent[] = [];
 
   constructor(setup: ClassSetup) {
@@ -126,6 +128,15 @@ export class ClassFlow {
   /** The engine of the running heat; null outside 'riding'. */
   engine(): RoundEngine | null {
     return this.currentPhase === 'riding' ? this.running : null;
+  }
+
+  /**
+   * The final snapshot of a finished heat — every rider finished or eliminated, with the faults and status of the
+   * heat's results — or null while it has not ended. The tick that ends a heat also switches to 'results', so from
+   * that tick on engine() is null: this is where the heat's last values are read (audit K1 r2 #2).
+   */
+  finalSnapshot(heatIndex: number): RoundSnapshot | null {
+    return this.finals.get(heatIndex) ?? null;
   }
 
   /** When the current phase began (server ms); null before start(). A late joiner is told this with the phase. */
@@ -165,6 +176,7 @@ export class ClassFlow {
         for (const event of roundEvents) events.push({ ...event, heatIndex });
         if (!this.running.isComplete()) break;
         this.finished.push(...this.running.results());
+        this.finals.set(heatIndex, this.running.snapshot());
         const endedAt = roundEvents.reduce((latest, e) => ('at' in e ? Math.max(latest, e.at) : 'decidedAt' in e ? Math.max(latest, e.decidedAt) : latest), phaseAt);
         this.currentPhase = 'results';
         this.phaseAt = Math.min(endedAt, now);

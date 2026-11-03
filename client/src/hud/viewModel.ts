@@ -143,9 +143,11 @@ export function hudModel(input: HudInput): HudModel {
 }
 
 /**
- * The heat that just ended, from the riders the state still carries during 'results' (the engine is gone, the
- * class table comes only with 'done'): finishers first by faults, then the eliminated by faults, ties by name.
- * There are no times in the state, so none are shown; the class table brings them.
+ * The heat that just ended, from the riders the state still carries during 'results' (the class table comes only
+ * with 'done'): the room publishes the heat's final snapshot in the very patch that says 'results', so status and
+ * faults are the engine's results, time faults and the last refusal included (audit K1 r2 #2). Finishers first by
+ * faults, then the eliminated by faults, ties by name. There are no times in the state, so none are shown; the
+ * class table brings them.
  */
 export function heatResultsModel(state: LobbyStateSnapshot, names: HudNames, locale: Locale, ownId: string): HeatResultRow[] {
   const rank = (status: string): number => (status === 'finished' ? 0 : status === 'eliminated' ? 1 : 2);

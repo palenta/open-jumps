@@ -151,6 +151,34 @@ describe('phases and heats', () => {
     expect(flow.phaseEndsAt()).toBeNull();
   });
 
+  it('the tick that ends a heat already says results and has no engine; the final snapshot of that heat stays, with the status and faults of its results (audit K1 r2 #2)', () => {
+    const flow = new ClassFlow(setup());
+    flow.start(0);
+    expect(flow.finalSnapshot(0)).toBeNull();
+    let lastRidingTick: { at: number; riding: number } | null = null;
+    for (let t = RUN.tickMs; t <= 90_000 && flow.phase !== 'results'; t += RUN.tickMs) {
+      const before = flow.engine()?.snapshot().riders.filter((r) => r.status === 'riding').length ?? 0;
+      flow.tick(t);
+      if (before > 0) lastRidingTick = { at: t, riding: before };
+    }
+    // The last finish or elimination and the switch to 'results' happen in the same tick: from it on engine() is null.
+    expect(flow.phase).toBe('results');
+    expect(flow.engine()).toBeNull();
+    expect(lastRidingTick?.riding).toBeGreaterThan(0);
+    const final = flow.finalSnapshot(0);
+    expect(final).toMatchObject({ roundId: 'class-7#0', complete: true });
+    const heat = flow.results().filter((r) => r.roundId === 'class-7#0');
+    expect(final?.riders.map((r) => r.riderId).sort()).toEqual(heat.map((r) => r.riderId).sort());
+    for (const result of heat) {
+      expect(final?.riders.find((r) => r.riderId === result.riderId)).toMatchObject({ status: result.status, faults: result.faults, eliminationReason: result.eliminationReason });
+    }
+    drive(flow, lastRidingTick?.at ?? 0, 120_000, ['ana']);
+    expect(flow.phase).toBe('done');
+    expect(flow.finalSnapshot(1)).toMatchObject({ roundId: 'class-7#1', complete: true });
+    expect(flow.finalSnapshot(0)).toBe(final);
+    expect(flow.finalSnapshot(2)).toBeNull();
+  });
+
   it('a rider who leaves mid-heat is eliminated "disconnected", the heat continues, and they are out of later heats', () => {
     const flow = new ClassFlow(setup());
     flow.start(0);
