@@ -106,6 +106,29 @@ export interface Game {
 
 const CONTROLS: Control[] = ['turn-left', 'turn-right', 'gear', 'tap'];
 
+export const PRESS_TIME = {
+  /**
+   * The oldest an event's timeStamp may be, against the clock at handling, to be taken as the moment of the touch.
+   * Real handler delays are far shorter (the smoke route measured 58–122 ms in headless Chromium, its longest task
+   * 420 ms); a timeStamp of another time base — epoch ms in an old engine (later than now), 0 or the document's start
+   * for a synthetic event (long before) — falls outside. A tap even 300 ms older than its arrival is refused by the
+   * server as too old (PACKET.maxAgeMs) whatever it says, so nothing older than 1 s can matter for a take-off.
+   */
+  maxEventAgeMs: 1000,
+} as const;
+
+/**
+ * The moment of a press in the clock's units (audit K1 r3 #4): the event's own timeStamp — a DOMHighResTimeStamp in
+ * the base of performance.now(), the clock main.ts gives ClientClock — when it is finite, not later than `now` (the
+ * clock read while handling) and at most PRESS_TIME.maxEventAgeMs before it; otherwise `now`. The handler runs
+ * whenever the main thread is free — 58–122 ms after the touch was measured while frames took 33–77 ms — and the
+ * judge must see when the finger landed, not when the page got round to it.
+ */
+export function pressTime(timeStamp: number, now: number): number {
+  if (!Number.isFinite(timeStamp) || timeStamp > now || now - timeStamp > PRESS_TIME.maxEventAgeMs) return now;
+  return timeStamp;
+}
+
 /** Everything the client keeps for one class: re-created at every class-course, so a new class starts clean. */
 interface RoundModules {
   classNumber: number;
@@ -171,8 +194,12 @@ interface RoundModules {
  *   are drawn as [data-control="turn-left"|"turn-right"|"gear"|"tap"], absolutely positioned INSIDE the arena with
  *   style left/top/width/height in px of the layout's zones (arena-local coordinates; the arena is
  *   position: relative). [data-arena] receives pointerdown: the finger's clientX/clientY minus the rectangle's
- *   left/top is tested with hitTest → InputController.press(control, clock.now()); a finger outside the rectangle
- *   is ignored. [data-hud-fence], [data-hud-faults], [data-hud-time], [data-hud-gear], [data-hud-caption],
+ *   left/top is tested with hitTest → InputController.press(control, pressTime(event.timeStamp, clock.now())); a
+ *   finger outside the rectangle is ignored. The time of a press is the moment of the touch (audit K1 r3 #4): the
+ *   event's timeStamp (performance.now() base, the clock's own units in the browser) is the clientTime of a 'tap' or
+ *   a 'turn', the moment the turn window is checked against and the moment the instant hint judges; a timeStamp that
+ *   is not finite, later than clock.now(), or more than PRESS_TIME.maxEventAgeMs (1 s) before it cannot be the touch,
+ *   and clock.now() at handling is used instead. [data-hud-fence], [data-hud-faults], [data-hud-time], [data-hud-gear], [data-hud-caption],
  *   [data-badge] (placeholder art) from hudModel; [data-rotate] is shown (hidden attribute removed) when
  *   needsRotation(rect.width, rect.height), and while it is shown every pointerdown on the arena is ignored (the
  *   hidden zones take no input). While the own horse's approach is open (from the 'approach' event
@@ -654,10 +681,12 @@ export function createGame(deps: GameDeps): Game {
     if (x < 0 || y < 0 || x >= rect.width || y >= rect.height) return;
     const control = hitTest(layout, x, y);
     if (control === null) return;
-    const now = deps.clock.now();
-    const sent = round.controller.press(control, now);
+    // When the finger landed, not when this handler got to run (audit K1 r3 #4): the tap's and the turn's clientTime
+    // and the instant hint all read the event's own time.
+    const at = pressTime(event.timeStamp, deps.clock.now());
+    const sent = round.controller.press(control, at);
     if (sent?.type === 'tap') {
-      const hint = round.hint.tap(now);
+      const hint = round.hint.tap(at);
       if (hint) round.caption = { event: { type: 'takeoff', label: hint.outcome.label, fence: hint.fence }, riderId: me?.id ?? '' };
     }
     updateHud();

@@ -8,6 +8,8 @@ import { caption as captionOf, type ApproachState, type CourseSpec, type Takeoff
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   createGame,
+  PRESS_TIME,
+  pressTime,
   type ApiLike,
   type ArenaRect,
   type ClockLike,
@@ -644,8 +646,15 @@ function select(root: ParentNode, selector: string, value: string): void {
 }
 
 /** A finger on the arena at viewport coordinates (x, y). */
-function press(h: Harness, [x, y]: [number, number]): void {
-  q(h.root, '[data-arena]').dispatchEvent(new PointerEvent('pointerdown', { clientX: x, clientY: y, bubbles: true, cancelable: true }));
+/**
+ * A finger on the arena at (x, y). The event's timeStamp — the moment of the touch, in the clock's units — is the
+ * test clock's reading unless given: a real event is stamped by the browser, and happy-dom's own stamp is the
+ * process's performance.now(), unrelated to the test clock.
+ */
+function press(h: Harness, [x, y]: [number, number], timeStamp: number = h.clock.now()): void {
+  const event = new PointerEvent('pointerdown', { clientX: x, clientY: y, bubbles: true, cancelable: true });
+  Object.defineProperty(event, 'timeStamp', { value: timeStamp });
+  q(h.root, '[data-arena]').dispatchEvent(event);
 }
 
 /** A finger on the page at viewport coordinates (x, y) when the arena is not on screen: the root hears the pointerdown. */
@@ -1601,6 +1610,64 @@ describe('pointer presses on the arena', () => {
       { type: 'tap', clientTime: 10_000, fence: 1, attempt: 1 },
       { type: 'tap', clientTime: 70_000, fence: 1, attempt: 1 },
     ]);
+  });
+});
+
+describe('the moment of a press is the moment of the touch, not of its handling (audit K1 r3 #4)', () => {
+  it('a tap handled 130 ms after the touch: clientTime is the event time, and the instant hint judges that moment', async () => {
+    const h = await inRound();
+    const t0 = h.clock.now() + 1_000;
+    approachOwn(h, 1, 1, t0);
+    h.clock.t = t0 + 150; // the main thread was busy: the handler runs 130 ms after the finger landed
+    press(h, TAP, t0 + 20);
+    expect(h.session().sentOf('tap')).toEqual([{ type: 'tap', clientTime: t0 + 20, fence: 1, attempt: 1 }]);
+    h.game.frame(h.clock.now());
+    expect(text(h.root.querySelector('[data-hud-caption]'))).toBe('Dakota: perfecta at fence 1!'); // +20, never +150
+  });
+
+  it('a turn handled late: clientTime is the event time (also for the turn window)', async () => {
+    const h = await inRound();
+    h.session().emitMessage(roundEvent({ type: 'turn-ahead', riderId: 'host', distanceM: 45, at: h.clock.now() }));
+    const touch = h.clock.now() + 3_400; // inside the 3.5 s window
+    h.clock.t = touch + 200; // handled after the window closed: the touch decides, it is still a turn
+    press(h, TURN_LEFT, touch);
+    expect(h.session().sentOf('turn')).toEqual([{ type: 'turn', choice: 'left', clientTime: touch }]);
+    expect(h.session().sentOf('line')).toEqual([]);
+  });
+
+  it('a timeStamp that cannot be the touch falls back to the clock at handling: later than now, more than 1 s before it, not finite', async () => {
+    for (const stamp of [Number.NaN, Number.POSITIVE_INFINITY, 1_700_000_000_000, 0]) {
+      const h = await inRound();
+      const t0 = h.clock.now() + 1_000;
+      approachOwn(h, 1, 1, t0);
+      h.clock.t = t0 + 10;
+      const bogus = stamp === 0 ? h.clock.now() - PRESS_TIME.maxEventAgeMs - 1 : stamp;
+      press(h, TAP, bogus);
+      expect(h.session().sentOf('tap'), String(bogus)).toEqual([{ type: 'tap', clientTime: t0 + 10, fence: 1, attempt: 1 }]);
+      h.game.frame(h.clock.now());
+      expect(text(h.root.querySelector('[data-hud-caption]'))).toBe('Dakota: perfecta at fence 1!');
+      h.game.destroy();
+    }
+  });
+
+  it('a turn with an implausible timeStamp falls back to the clock: outside the window it is a line shift', async () => {
+    const h = await inRound();
+    h.session().emitMessage(roundEvent({ type: 'turn-ahead', riderId: 'host', distanceM: 45, at: h.clock.now() }));
+    h.clock.t += 3_600; // the window is over at handling
+    press(h, TURN_LEFT, h.clock.now() + 50); // a stamp from the future is not the touch
+    expect(h.session().sentOf('turn')).toEqual([]);
+    expect(h.session().sentOf('line')).toEqual([{ type: 'line', line: 'angle' }]);
+  });
+
+  it('pressTime: the event time when it is finite, not later than now and at most PRESS_TIME.maxEventAgeMs before it; otherwise now', () => {
+    expect(PRESS_TIME).toEqual({ maxEventAgeMs: 1000 });
+    expect(pressTime(9_880, 10_000)).toBe(9_880);
+    expect(pressTime(10_000, 10_000)).toBe(10_000);
+    expect(pressTime(9_000, 10_000)).toBe(9_000);
+    expect(pressTime(8_999, 10_000)).toBe(10_000);
+    expect(pressTime(10_001, 10_000)).toBe(10_000);
+    expect(pressTime(Number.NaN, 10_000)).toBe(10_000);
+    expect(pressTime(Number.NEGATIVE_INFINITY, 10_000)).toBe(10_000);
   });
 });
 
