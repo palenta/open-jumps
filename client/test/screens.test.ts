@@ -35,4 +35,14 @@ describe('screenFor', () => {
     expect(screenFor(signedIn({ room: 'joined', phase: 'results' }))).toBe('results');
     expect(screenFor(signedIn({ room: 'joined', phase: 'done' }))).toBe('results');
   });
+
+  it('a session that ended for good shows the ended screen whatever the phase says (audit K1 r1 #5)', () => {
+    for (const phase of ['lobby', 'walk', 'riding', 'results', 'done', null] as const) {
+      expect(screenFor(signedIn({ room: 'joined', phase, ended: true })), String(phase)).toBe('ended');
+    }
+    expect(screenFor(signedIn({ room: 'joined', phase: 'riding', ended: false }))).toBe('round');
+    // Outside a room there is nothing to have ended: home and sign-in stay what they are.
+    expect(screenFor(signedIn({ room: 'none', phase: null, ended: true }))).toBe('home');
+    expect(screenFor({ signedIn: false, room: 'joined', phase: 'riding', ended: true })).toBe('signin');
+  });
 });

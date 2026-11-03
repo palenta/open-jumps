@@ -129,9 +129,9 @@ interface RoundModules {
 
 /**
  * The DOM contract (data attributes shared by the renderer, the styles and the tests):
- * - root[data-screen] is the Screen ('signin' | 'home' | 'lobby' | 'walk' | 'round' | 'results'); every visible
- *   string comes from translate() in the current locale; [data-action="locale"][data-locale="en"|"es"] switch it
- *   and re-render in place.
+ * - root[data-screen] is the Screen ('signin' | 'home' | 'lobby' | 'walk' | 'round' | 'results' | 'ended'); every
+ *   visible string comes from translate() in the current locale; [data-action="locale"][data-locale="en"|"es"]
+ *   switch it and re-render in place.
  * - signin: form[data-form="register"] (riderName, pin, ponyName, riderGender, ponyGender, ponyCategory) and
  *   form[data-form="login"] (riderName, pin); submit calls the API; a failure shows translate('signin.error.<code>')
  *   in [data-error]; success → home. On start the game asks api.me(): signed in → home, else signin.
@@ -148,8 +148,11 @@ interface RoundModules {
  *   visitor ringing while the host is already in the lobby appears without a reload); input[data-action="entry-open"] and
  *   input[data-action="auto-admit"] (checkboxes); select[data-height] sends {type:'height'}; input[data-assist=
  *   "schoolmaster"|"widerWindow"] send {type:'assists'}; [data-action="start-class"] (host only) sends start-class
- *   with select[data-order]; [data-action="leave"] leaves to home. A session end shows translate('lobby.ended.
- *   <kind>') in [data-ended]; for 'lost' a [data-action="reconnect"] button asks the room status and connects again.
+ *   with select[data-order]; [data-action="leave"] leaves to home.
+ * - ended: shown the moment the session is over for good (kicked, revoked, lost), whatever phase the last state
+ *   named — never a frozen walk or round (audit K1 r1 #5): translate('lobby.ended.<kind>') in [data-ended]; for
+ *   'lost' a [data-action="reconnect"] button asks the room status and connects a new session; [data-action="leave"]
+ *   goes home. The arena takes no input on this screen.
  * - walk: [data-list="fences"] > li (walkModel texts), [data-focus] the focused fence number, the scene mounted in
  *   [data-arena] with the course.
  * - round: the layout is layoutFor(rect.width, rect.height) of the MEASURED arena rectangle (deps.measure, by
@@ -237,7 +240,7 @@ export function createGame(deps: GameDeps): Game {
   const isHost = (): boolean => me !== null && state()?.hostId === me.id;
 
   function screen(): Screen {
-    return screenFor({ signedIn: me !== null, room: session !== null ? 'joined' : joining ? 'joining' : 'none', phase: state()?.phase ?? null });
+    return screenFor({ signedIn: me !== null, room: session !== null ? 'joined' : joining ? 'joining' : 'none', phase: state()?.phase ?? null, ended: sessionEnd !== null });
   }
 
   function names(): HudNames {
@@ -640,11 +643,18 @@ export function createGame(deps: GameDeps): Game {
     </section>`;
   }
 
+  /** The session is over for good: why, and the way on — a reconnect for a lost connection, home for the rest. */
   function renderEnded(): string {
     if (!sessionEnd) return '';
     const message = translateKey(locale, `lobby.ended.${sessionEnd.kind}`);
-    const reconnect = sessionEnd.kind === 'lost' ? `<button type="button" data-action="reconnect" class="primary">${escapeHtml(message)}</button>` : '';
-    return `<p data-ended class="ended">${escapeHtml(message)}</p>${reconnect}`;
+    const reconnect = sessionEnd.kind === 'lost' ? `<button type="button" data-action="reconnect" class="primary">${escapeHtml(t('lobby.reconnect'))}</button>` : '';
+    return `<section class="screen ended">
+      <h1>${escapeHtml(t('lobby.title', { code: roomCode }))}</h1>
+      <p data-ended class="ended">${escapeHtml(message)}</p>
+      ${reconnect}
+      <button type="button" data-action="leave" class="link">${escapeHtml(t('lobby.backHome'))}</button>
+      ${localeButtons()}
+    </section>`;
   }
 
   function renderLobby(): string {
@@ -683,7 +693,6 @@ export function createGame(deps: GameDeps): Game {
       <h1>${escapeHtml(model.title)}</h1>
       <p class="code" data-code>${escapeHtml(model.code)}</p>
       <p class="hint">${escapeHtml(t('lobby.shareCode'))}</p>
-      ${renderEnded()}
       <h2>${escapeHtml(t('lobby.participants'))}</h2>
       <ul data-list="participants">${model.participants.map((person) => row({ accountId: person.accountId, name: person.name, tag: person.tag }, person.isHost ? '' : model.isHost ? `<button type="button" data-action="kick" data-id="${escapeHtml(person.accountId)}">${escapeHtml(t('lobby.kick'))}</button>` : '')).join('')}</ul>
       ${door}
@@ -738,7 +747,6 @@ export function createGame(deps: GameDeps): Game {
         .join('')}</div>
       ${isHost() ? `<button type="button" data-action="again" class="primary">${escapeHtml(t('lobby.again'))}</button>` : ''}
       <button type="button" data-action="leave" class="link">${escapeHtml(t('lobby.leave'))}</button>
-      ${renderEnded()}
       ${localeButtons()}
     </section>`;
   }
@@ -754,6 +762,7 @@ export function createGame(deps: GameDeps): Game {
       : current === 'lobby' ? renderLobby()
       : current === 'walk' ? renderWalk()
       : current === 'round' ? renderRound()
+      : current === 'ended' ? renderEnded()
       : renderResults();
     if (current === 'round' && renderedScreen === 'round') {
       // The round screen is updated in place: its controls and listeners stay put at 20 Hz.

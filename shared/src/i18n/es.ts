@@ -75,6 +75,8 @@ export const es: Record<keyof typeof en, string> = {
   'lobby.ended.revoked': 'Has salido de la cuenta en este dispositivo',
   'lobby.ended.lost': 'Se perdió la conexión — toca para volver',
   'lobby.ended.left': 'Has salido de la sala',
+  'lobby.reconnect': 'Volver a conectar',
+  'lobby.backHome': 'Volver al inicio',
 
   'walk.title': '{term:reconocimiento}',
   'walk.fence': 'Salto {number}: {type}, {cm} cm',

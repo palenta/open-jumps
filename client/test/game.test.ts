@@ -617,6 +617,11 @@ function press(h: Harness, [x, y]: [number, number]): void {
   q(h.root, '[data-arena]').dispatchEvent(new PointerEvent('pointerdown', { clientX: x, clientY: y, bubbles: true, cancelable: true }));
 }
 
+/** A finger on the page at viewport coordinates (x, y) when the arena is not on screen: the root hears the pointerdown. */
+function pressPage(h: Harness, [x, y]: [number, number]): void {
+  h.root.dispatchEvent(new PointerEvent('pointerdown', { clientX: x, clientY: y, bubbles: true, cancelable: true }));
+}
+
 /** Fills and submits the register form with Maria on Dakota. */
 async function register(h: Harness): Promise<void> {
   const form = q<HTMLFormElement>(h.root, 'form[data-form="register"]');
@@ -1516,6 +1521,61 @@ describe('the tab lifecycle', () => {
     expect(h.sessions[1]?.connects).toEqual([['r1', 'ABCDEF']]);
     expect(h.game.session).toBe(h.sessions[1]);
     expect(h.root.dataset.screen).toBe('lobby');
+  });
+
+  it('a session lost during the course walk: the ended screen with the lost text, reconnect and back buttons; the walk is no longer drawn (audit K1 r1 #5)', async () => {
+    const h = await inWalk();
+    h.session().endWith({ kind: 'lost', code: 1006 });
+    await settle();
+    expect(h.root.dataset.screen).toBe('ended');
+    expect(h.game.screen).toBe('ended');
+    expect(text(h.root.querySelector('[data-ended]'))).toBe('Connection lost — tap to reconnect');
+    expect(h.root.querySelector('[data-action="reconnect"]')).not.toBeNull();
+    expect(h.root.querySelector('[data-action="leave"]')).not.toBeNull();
+    h.game.frame(h.clock.now());
+    expect(h.scene.frames.at(-1)?.phase).toBe('idle');
+  });
+
+  it('a session lost while riding: the controls take no input; reconnect asks the room status and a new session rides on (audit K1 r1 #5)', async () => {
+    const h = await hostInLobby({ roomStatus: [ok<RoomStatusReply>({ status: 'host', roomId: 'r1' })] });
+    startClass(h);
+    await settle();
+    approachOwn(h);
+    h.session().endWith({ kind: 'lost', code: 1006 });
+    await settle();
+    expect(h.root.dataset.screen).toBe('ended');
+    expect(h.root.querySelector('[data-arena]')).toBeNull(); // the arena and its controls are off the screen
+    h.clock.t += 1_000;
+    pressPage(h, TAP);
+    pressPage(h, GEAR);
+    expect(h.session().sent).toEqual([]);
+    h.settings.stateOnConnect = ridingState();
+    click(h.root, '[data-action="reconnect"]');
+    await settle();
+    expect(h.api.callsOf('roomStatus')).toEqual([['ABCDEF']]);
+    expect(h.sessions).toHaveLength(2);
+    expect(h.game.session).toBe(h.sessions[1]);
+    expect(h.root.dataset.screen).toBe('round');
+  });
+
+  it.each([
+    ['kicked', 4100, 'You were asked to leave this room'],
+    ['revoked', 4101, 'You were signed out on this device'],
+  ] as const)('a session ended as %s while riding: the ended screen with its text, no reconnect, the controls dead; back leads home (audit K1 r1 #5)', async (kind, code, message) => {
+    const h = await inApproach();
+    h.session().endWith({ kind, code });
+    await settle();
+    expect(h.root.dataset.screen).toBe('ended');
+    expect(text(h.root.querySelector('[data-ended]'))).toBe(message);
+    expect(h.root.querySelector('[data-action="reconnect"]')).toBeNull();
+    expect(h.root.querySelector('[data-arena]')).toBeNull();
+    h.clock.t += 1_000;
+    pressPage(h, TAP);
+    expect(h.session().sent).toEqual([]);
+    click(h.root, '[data-action="leave"]');
+    await settle();
+    expect(h.root.dataset.screen).toBe('home');
+    expect(h.game.session).toBeNull();
   });
 
   it('destroy() removes the window listeners, leaves the session and disposes the scene', async () => {
