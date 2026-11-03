@@ -823,7 +823,7 @@ describe('audit round 2 of B2: the reservation is for the room the URL names, re
   }, 110000);
 });
 
-type ApproachSync = { classNumber: number; heatIndex: number; hardTurn: boolean; approach: { fence: number; attempt: number; t0: number } | null };
+type ApproachSync = { classNumber: number; heatIndex: number; hardTurn: boolean; approach: { fence: number; attempt: number; t0: number; speedMps: number } | null };
 const approachSyncs = (seat: Seat) => seat.received.filter((m) => m.type === 'approach-sync').map((m) => m.payload as ApproachSync);
 
 /** A seat for a connection the SDK already holds (a reconnection by token): the same recording and clock answers as sit(). */
@@ -860,7 +860,7 @@ describe('audit K1 r2 #1: a rider who takes control back is told the approach in
     expect(roundEvents(friendSeat, 'approach', friend.account.id)).toEqual([]); // the broadcast never reached her
     const back = reattach(await sdk(friend.token).reconnect<LobbyState>(token), friend, 1500);
     await until(() => approachSyncs(back).length > 0, 2000, 'approach-sync on the new connection');
-    expect(approachSyncs(back)).toEqual([{ classNumber: 1, heatIndex: 0, hardTurn: false, approach: { fence: approach.fence, attempt: approach.attempt, t0: approach.t0 } }]);
+    expect(approachSyncs(back)).toEqual([{ classNumber: 1, heatIndex: 0, hardTurn: false, approach: { fence: approach.fence, attempt: approach.attempt, t0: approach.t0, speedMps: 5 } }]);
     expect(approachSyncs(hostSeat)).toEqual([]);
     // The reconnected connection is measured again (the series goes to the NEW connection, not the stale one).
     await until(() => clockPings(back).length >= 3, 2000, 'a clock series on the new connection');
@@ -884,7 +884,7 @@ describe('audit K1 r2 #1: a rider who takes control back is told the approach in
     await until(() => approachSyncs(again).length > 0, 2000, 'approach-sync on the fresh connection');
     const order = again.received.map((m) => m.type).filter((type) => type === 'class-course' || type === 'class-phase' || type === 'approach-sync');
     expect(order).toEqual(['class-course', 'class-phase', 'approach-sync']);
-    expect(approachSyncs(again)).toEqual([{ classNumber: 1, heatIndex: 0, hardTurn: false, approach: { fence: approach.fence, attempt: approach.attempt, t0: approach.t0 } }]);
+    expect(approachSyncs(again)).toEqual([{ classNumber: 1, heatIndex: 0, hardTurn: false, approach: { fence: approach.fence, attempt: approach.attempt, t0: approach.t0, speedMps: 5 } }]);
     expect(approachSyncs(hostSeat)).toEqual([]);
     await until(() => clockPings(again).length >= 4, 2000, 'the fresh clock series'); // three answered pongs make it ready
     expect(approach.t0 - serverNow()).toBeGreaterThan(300);
@@ -905,6 +905,29 @@ describe('audit K1 r2 #1: a rider who takes control back is told the approach in
     expect(approachSyncs(back)).toEqual([{ classNumber: 1, heatIndex: 0, hardTurn: false, approach: null }]);
     await until(() => roundEvents(back, 'approach', friend.account.id).length > 0, 5000, 'the approach broadcast on the new connection');
     await back.client.leave();
+    await hostSeat.client.leave();
+  }, 30000);
+});
+
+describe('K1.1 step 5: the approach messages carry the frozen approach speed (speedMps)', () => {
+  it("the 'approach' broadcast says each horse's own speed: 6 m/s for the host in extended canter, 5 m/s for the friend in collected", async () => {
+    const { entry, room, riders } = await openRoom(2);
+    const [host, friend] = riders as [Rider, Rider];
+    const hostSeat = await sit(room.roomId, entry.code, host.token, host.account.id);
+    const friendSeat = await sit(room.roomId, entry.code, friend.token, friend.account.id);
+    await clocksSynced();
+    await startRiding(hostSeat);
+    hostSeat.client.send('room', { type: 'gear', gear: 'extended' });
+    await until(
+      () => roundEvents(friendSeat, 'approach', host.account.id).length > 0 && roundEvents(friendSeat, 'approach', friend.account.id).length > 0,
+      8000,
+      'both approach events',
+    );
+    expect(roundEvents(friendSeat, 'approach', host.account.id)[0]).toMatchObject({ fence: 1, attempt: 1, t0: expect.any(Number), speedMps: 6 });
+    expect(roundEvents(friendSeat, 'approach', friend.account.id)[0]).toMatchObject({ fence: 1, attempt: 1, t0: expect.any(Number), speedMps: 5 });
+    // Every connection hears the same value: the host's copy of her own event.
+    expect(roundEvents(hostSeat, 'approach', host.account.id)[0]).toMatchObject({ speedMps: 6 });
+    await friendSeat.client.leave();
     await hostSeat.client.leave();
   }, 30000);
 });

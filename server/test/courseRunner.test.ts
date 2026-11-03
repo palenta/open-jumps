@@ -2,7 +2,7 @@
 // action time, "no tap" at the deadline, refusals and falls with restarts, turns with timing, schoolmaster,
 // autopilot, the finish and the time limit. Everything below is in server milliseconds with the start at 0; the
 // moments come from the THREE_FENCE_COURSE fixture (t0 = 6000 / 12 000 / 20 000, turn moment 9000, finish 24 000).
-import { BASE_WINDOW, RANKED_NO_ASSISTS, freezeForRound, type RoundRules } from '@open-jumps/shared';
+import { BASE_WINDOW, RANKED_NO_ASSISTS, freezeForRound, gearSpeedMPerS, type RoundRules } from '@open-jumps/shared';
 import { describe, expect, it } from 'vitest';
 import { CourseRunner, RUN, type RunnerDeps, type RunnerEvent, type TapResult } from '../src/round/courseRunner.js';
 import { LIMIT_EDGE_COURSE, SLOW_LIMIT_COURSE, THREE_FENCE_COURSE as COURSE } from './fixtures/courses.js';
@@ -44,7 +44,7 @@ describe('running and the approach', () => {
     const events = drive(r, 0, 3550);
     expect(r.snapshot()).toMatchObject({ positionM: 17.75, phase: 'running', t0: null });
     expect(events).toEqual([]);
-    expect(r.tick(3600)).toEqual([{ type: 'approach', fence: 1, attempt: 1, t0: 6000 }]);
+    expect(r.tick(3600)).toEqual([{ type: 'approach', fence: 1, attempt: 1, t0: 6000, speedMps: 5 }]);
     expect(r.snapshot()).toMatchObject({ positionM: 18, phase: 'approach', t0: 6000 });
     expect(r.elapsedMs(3600)).toBe(3600);
   });
@@ -165,7 +165,7 @@ describe('taps and the decision moment (matrix row 3)', () => {
     drive(r, 0, 3550);
     expect(r.undecidedApproach()).toBeNull(); // not in the zone yet
     r.tick(3600);
-    expect(r.undecidedApproach()).toEqual({ fence: 1, attempt: 1, t0: 6000 });
+    expect(r.undecidedApproach()).toEqual({ fence: 1, attempt: 1, t0: 6000, speedMps: 5 });
     r.setLine('angle', 3700);
     drive(r, 3600, 6300);
     r.tap(tap(6300, 6350));
@@ -176,7 +176,7 @@ describe('taps and the decision moment (matrix row 3)', () => {
     r.setLine('center', 6400);
     const restart = driveUntil(r, 6350, (e) => e.type === 'restart');
     const retry = r.undecidedApproach();
-    expect(retry).toEqual({ fence: 1, attempt: 2, t0: expect.any(Number) });
+    expect(retry).toEqual({ fence: 1, attempt: 2, t0: expect.any(Number), speedMps: 5 });
     const t0 = nextTick(retry?.t0 ?? 0);
     drive(r, restart.at, t0);
     r.tap(tap(t0, t0 + 10, 1, 2));
@@ -539,7 +539,7 @@ describe('schoolmaster, autopilot and withdrawal (matrix rows 8, 9)', () => {
     drive(r, 17600, 19950);
     expect(r.snapshot()).toMatchObject({ phase: 'waiting', positionM: 88 });
     r.reconnected(20000);
-    expect(r.tick(20000)).toEqual([{ type: 'autopilot', at: 20000, on: false }, { type: 'approach', fence: 3, attempt: 1, t0: 22400 }]);
+    expect(r.tick(20000)).toEqual([{ type: 'autopilot', at: 20000, on: false }, { type: 'approach', fence: 3, attempt: 1, t0: 22400, speedMps: 5 }]);
     expect(r.snapshot()).toMatchObject({ autopilot: false, usedAutopilot: true, phase: 'approach' });
     r.tap(tap(22400, 22450, 3, 1));
     const finish = drive(r, 20000, 26400).find((e) => e.type === 'finish');
@@ -714,5 +714,91 @@ describe('schoolmaster, autopilot and withdrawal (matrix rows 8, 9)', () => {
     expect(r.elapsedMs(9000)).toBe(5000);
     expect(r.tick(5050)).toEqual([]);
     expect(r.tap(tap(6000, 6050))).toEqual({ kind: 'ignored', reason: 'done' });
+  });
+});
+
+describe('the approach speed in the messages (K1.1 step 5: speedMps = Approach.speed)', () => {
+  /** The first 'approach' event of a run, with the tick it came with. */
+  const firstApproach = (r: CourseRunner, from = 0): Extract<RunnerEvent, { type: 'approach' }> => {
+    const { event } = driveUntil(r, from, (e) => e.type === 'approach');
+    if (event.type !== 'approach') throw new Error('not an approach');
+    return event;
+  };
+
+  it('collected canter: the approach event and the undecided approach carry 5 m/s', () => {
+    const r = runner();
+    const approach = firstApproach(r);
+    expect(approach).toEqual({ type: 'approach', fence: 1, attempt: 1, t0: 6000, speedMps: 5 });
+    expect(r.undecidedApproach()).toEqual({ fence: 1, attempt: 1, t0: 6000, speedMps: 5 });
+  });
+
+  it('extended canter: 6 m/s; gallop: 7 m/s — the speed of the gear in force at the zone entry', () => {
+    const extended = runner();
+    extended.setGear('extended', 100);
+    expect(firstApproach(extended).speedMps).toBe(gearSpeedMPerS('extended'));
+    expect(gearSpeedMPerS('extended')).toBe(6);
+    const gallop = runner();
+    gallop.setGear('gallop', 100);
+    expect(firstApproach(gallop).speedMps).toBe(gearSpeedMPerS('gallop'));
+    expect(gearSpeedMPerS('gallop')).toBe(7);
+  });
+
+  it('the speed is the one t0 was computed with: 12 m of the zone at speedMps take t0 − the zone entry', () => {
+    const r = runner();
+    r.setGear('gallop', 100);
+    const { event, at } = driveUntil(r, 0, (e) => e.type === 'approach');
+    if (event.type !== 'approach') throw new Error('not an approach');
+    // Inside the approach the horse is at fence − speed × (t0 − now): the rest of the way at speedMps takes t0 − now.
+    expect(event.t0 - at).toBeCloseTo(((30 - r.snapshot().positionM) / event.speedMps) * 1000, 6);
+  });
+
+  it('frozen: a gear change inside the approach changes neither the undecided approach\'s speed nor its t0', () => {
+    const r = runner();
+    const approach = firstApproach(r);
+    r.setGear('gallop', 3700);
+    drive(r, 3600, 4000);
+    expect(r.undecidedApproach()).toEqual({ fence: 1, attempt: 1, t0: approach.t0, speedMps: 5 });
+  });
+
+  it('after a wide turn the next approach is collected: 5 m/s although gallop was asked for', () => {
+    const r = runner();
+    drive(r, 0, 6000);
+    r.tap(tap(6000, 6050));
+    drive(r, 6000, 9450);
+    r.setGear('gallop', 9400);
+    expect(r.turn({ choice: 'left', actionTime: 9500, receiveTime: 9550 })).toMatchObject({ kind: 'judged', outcome: { quality: 'wide' } });
+    r.tick(9500);
+    r.tick(9550);
+    const approach = firstApproach(r, 9550);
+    expect(approach).toMatchObject({ fence: 2, speedMps: 5 });
+  });
+
+  it('schoolmaster collects the canter for the approach: 5 m/s whatever the rider asked', () => {
+    const r = runner({ rules: SCHOOLMASTER });
+    r.setGear('gallop', 100);
+    const approach = firstApproach(r);
+    expect(approach.speedMps).toBe(5);
+    expect(r.undecidedApproach()?.speedMps).toBe(5);
+  });
+
+  it('the re-approach after a refusal: collected again, 5 m/s, with its own attempt', () => {
+    const r = runner();
+    r.setLine('angle', 3700);
+    drive(r, 0, 6300);
+    r.tap(tap(6300, 6350)); // a run-out off the sharp line
+    r.tick(6350);
+    r.setLine('center', 6400);
+    driveUntil(r, 6350, (e) => e.type === 'restart');
+    expect(r.undecidedApproach()).toMatchObject({ fence: 1, attempt: 2, speedMps: 5 });
+  });
+
+  it('negative: between fences, in flight and stopped there is no undecided approach, so no speed either', () => {
+    const r = runner();
+    drive(r, 0, 3550);
+    expect(r.undecidedApproach()).toBeNull();
+    r.tick(3600);
+    r.tap(tap(6000, 6010));
+    drive(r, 3600, 6100);
+    expect(r.undecidedApproach()).toBeNull();
   });
 });

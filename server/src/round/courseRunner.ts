@@ -80,7 +80,12 @@ export interface RunnerSnapshot {
 }
 
 export type RunnerEvent =
-  | { type: 'approach'; fence: number; attempt: number; t0: number }
+  /**
+   * The approach zone entered: t0 fixed. speedMps (K1.1 step 5) is the approach speed frozen at that moment
+   * (Approach.speed, m/s — the speed t0 was computed with, also for an approach collected by a wide turn, schoolmaster
+   * or the autopilot), so a client can place the take-off marker and its own horse without a second model of the run.
+   */
+  | { type: 'approach'; fence: number; attempt: number; t0: number; speedMps: number }
   | { type: 'takeoff'; fence: number; attempt: number; decidedAt: number; offsetMs: number | null; outcome: TakeoffOutcome; approach: ApproachState }
   /** Entering the turn zone: the moment the turn must be taken (clients and tests know when to press). */
   | { type: 'turn-ahead'; distanceM: number; at: number }
@@ -145,6 +150,16 @@ interface OpenTurn {
 }
 
 const MS = 1000;
+
+/**
+ * The approach speed as the messages carry it (K1.1 step 5): Approach.speed. K1.1 contract stage — not sent yet:
+ * NaN marks the missing value (a client reads a speed that is not a finite positive number as an approach without
+ * speed, which is how every K1 client already behaves); the code stage sends approach.speed here.
+ */
+function wireSpeed(approach: Approach): number {
+  void approach;
+  return Number.NaN;
+}
 
 /**
  * Timing model (all times in server ms):
@@ -251,11 +266,12 @@ export class CourseRunner {
   /**
    * The approach open right now whose take-off is still undecided — what a client taking control back must arm its
    * tap for (audit K1 r2 #1) — or null: between fences, in flight (the decision is taken), stopped, waiting or done.
+   * speedMps is its frozen speed, as in its 'approach' event (K1.1 step 5).
    */
-  undecidedApproach(): { fence: number; attempt: number; t0: number } | null {
+  undecidedApproach(): { fence: number; attempt: number; t0: number; speedMps: number } | null {
     const approach = this.approach;
     if (!approach || approach.applied || approach.judge.decision.decided) return null;
-    return { fence: approach.fence.number, attempt: approach.attempt, t0: approach.t0 };
+    return { fence: approach.fence.number, attempt: approach.attempt, t0: approach.t0, speedMps: wireSpeed(approach) };
   }
 
   /** The approach state as of `time` (change log rewind), or null when no approach is open at that time. */
@@ -565,7 +581,7 @@ export class CourseRunner {
     this.approach = approach;
     this.lastJudge = approach.judge;
     this.phase = 'approach';
-    events.push({ type: 'approach', fence: fence.number, attempt, t0 });
+    events.push({ type: 'approach', fence: fence.number, attempt, t0, speedMps: wireSpeed(approach) });
   }
 
   private applyTakeoff(approach: Approach, offsetMs: number | null, decidedAt: number, events: RunnerEvent[]): void {

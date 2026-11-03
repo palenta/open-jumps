@@ -68,6 +68,10 @@ const FIRST_STATE_TIMEOUT_MS = 5000;
  * - state: the latest snapshot (state.toJSON()); onState fires after every patch.
  * - Messages reach onMessage listeners as ServerMessage ('round-event' carries the event under `event`);
  *   'class-course' is also remembered as course(); a malformed 'approach-sync' is dropped.
+ * - speedMps (K1.1 step 5) of an 'approach' round event and of the approach of an 'approach-sync' is handed on as
+ *   sent when it is a finite number above 0, and as null otherwise — missing, not a number, NaN, ±Infinity, 0 or
+ *   negative: an approach without speed (the game then draws the marker as an outline and the own horse from the
+ *   patch). An invalid speed never drops the message: the approach itself still arms the tap.
  * - A leave code 4100 → ended 'kicked', 4101 → 'revoked', a consented leave → 'left'. Any other close: with the
  *   SDK's retries ON, the SDK's onDrop makes the status 'dropped' and the SDK retries by itself — a successful
  *   retry → 'connected', and the final onLeave once the retries are exhausted (or refused at once: uptime too
@@ -307,6 +311,13 @@ function toSnapshot(state: unknown): LobbyStateSnapshot | null {
   };
 }
 
+/**
+ * K1.1 contract stage: the approach speed is not decoded yet — every approach reads as one without speed (what a K1
+ * client did); the code stage decodes speedMps as the class comment says, for 'approach-sync' and for the 'approach'
+ * round event (handed on as sent until then).
+ */
+const K1_NO_SPEED = null;
+
 /** A wire message into its ServerMessage shape; unknown types are dropped. */
 function decode(type: string, payload: unknown): ServerMessage | null {
   const p = (payload ?? {}) as Record<string, unknown>;
@@ -336,7 +347,10 @@ function decode(type: string, payload: unknown): ServerMessage | null {
         classNumber: p.classNumber,
         heatIndex: p.heatIndex,
         hardTurn: p.hardTurn === true,
-        approach: approach === null ? null : { fence: approach.fence as number, attempt: approach.attempt as number, t0: approach.t0 as number },
+        approach:
+          approach === null
+            ? null
+            : { fence: approach.fence as number, attempt: approach.attempt as number, t0: approach.t0 as number, speedMps: K1_NO_SPEED },
       };
     }
     case 'class-table':

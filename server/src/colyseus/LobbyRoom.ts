@@ -81,12 +81,14 @@ export interface LobbyRoomDeps {
  *   drive anything.
  * - Rider commands ('tap', 'turn', 'gear', 'line') are accepted only from riders of the running heat and always
  *   act on the sender's own horse (there is no horse id in the message, plan 2.3 / matrix row 20); anyone else is
- *   refused ('not-riding'). Take-off and turn decisions are broadcast as 'round-event' { riderId, ...event }.
+ *   refused ('not-riding'). Take-off and turn decisions are broadcast as 'round-event' { riderId, ...event }; the
+ *   'approach' event carries speedMps (K1.1 step 5): the approach speed the server froze at the zone entry (m/s, the
+ *   runner's Approach.speed) — the rules, windows and judging do not change, the clients only draw from it.
  * - A dropped connection during 'riding' keeps the seat for reconnectSeconds (Colyseus allowReconnection) with
  *   the horse on autopilot; a reconnection with the token — or a fresh join by the same account, also after the
  *   reservation expired — hands control back; an expired reservation never withdraws the rider (the horse waits
  *   and the time limit decides, plan 2.3). On handing control back the room sends that connection — and only it —
- *   'approach-sync' { classNumber, heatIndex, hardTurn, approach: { fence, attempt, t0 } | null }: the approach the
+ *   'approach-sync' { classNumber, heatIndex, hardTurn, approach: { fence, attempt, t0, speedMps } | null }: the approach the
  *   server has open for the rider's horse right now and still undecided (null between fences, in flight, stopped),
  *   and the hard-turn flag in force; the 'approach' broadcast went only to the connections alive when it opened, so
  *   this is how a returning client arms (or disarms) its take-off tap (audit K1 r2 #1). A fresh join gets it right

@@ -778,9 +778,13 @@ async function inRound(): Promise<Harness> {
   return h;
 }
 
-/** The server opens the own horse's approach of `fence`, `attempt` with the take-off moment `t0` (server time = device time here). */
-function approachOwn(h: Harness, fence = 1, attempt = 1, t0 = h.clock.now() + 1_000): void {
-  h.session().emitMessage(roundEvent({ type: 'approach', riderId: 'host', fence, attempt, t0 }));
+/**
+ * The server opens the own horse's approach of `fence`, `attempt` with the take-off moment `t0` (server time = device
+ * time here). K1 tests send it without speed (speedMps null: the K1 behaviour — the marker an outline, the own horse
+ * from the patch); the K1.1 tests of the marker and the forecast pass the speed.
+ */
+function approachOwn(h: Harness, fence = 1, attempt = 1, t0 = h.clock.now() + 1_000, speedMps: number | null = null): void {
+  h.session().emitMessage(roundEvent({ type: 'approach', riderId: 'host', fence, attempt, t0, speedMps }));
 }
 
 /** The host in heat 1 of class 1 with the approach of fence 1, attempt 1 open (t0 one second ahead): the tap is armed. */
@@ -1365,7 +1369,7 @@ describe('a late joiner whose clock is not measured yet (audit K1 r2 #3)', () =>
     await settle();
     expect(h.root.dataset.screen).toBe('round');
     const t0 = late.serverNow() + 3_000;
-    h.session().emitMessage({ type: 'approach-sync', classNumber: 1, heatIndex: 0, hardTurn: false, approach: { fence: 1, attempt: 1, t0 } });
+    h.session().emitMessage({ type: 'approach-sync', classNumber: 1, heatIndex: 0, hardTurn: false, approach: { fence: 1, attempt: 1, t0, speedMps: null } });
     h.game.frame(late.device.t);
     const tap = q(h.root, '[data-control="tap"]');
     expect(tap.hasAttribute('data-armed')).toBe(false); // the take-off moment is not known in device time yet
@@ -1842,7 +1846,7 @@ describe('a touch too old for the judge when it is handled is not sent (audit K1
 describe('the caption', () => {
   it('a tap at t0 shows the instant hint at once; the server verdict then replaces it', async () => {
     const h = await inRound();
-    h.session().emitMessage(roundEvent({ type: 'approach', riderId: 'host', fence: 1, attempt: 1, t0: h.clock.now() + 100 }));
+    h.session().emitMessage(roundEvent({ type: 'approach', riderId: 'host', fence: 1, attempt: 1, t0: h.clock.now() + 100, speedMps: null }));
     h.clock.t += 100;
     press(h, TAP);
     h.game.frame(h.clock.now());
@@ -1860,11 +1864,11 @@ describe('the caption', () => {
     const h = await inRound();
     const tap = q(h.root, '[data-control="tap"]');
     expect(tap.hasAttribute('data-armed')).toBe(false);
-    h.session().emitMessage(roundEvent({ type: 'approach', riderId: 'host', fence: 1, attempt: 1, t0: h.clock.now() + 1_200 }));
+    h.session().emitMessage(roundEvent({ type: 'approach', riderId: 'host', fence: 1, attempt: 1, t0: h.clock.now() + 1_200, speedMps: null }));
     h.game.frame(h.clock.now());
     expect(tap.getAttribute('data-armed')).toBe('true');
     expect(tap.getAttribute('data-takeoff-at')).toBe(String(h.clock.now() + 1_200)); // offset 0: server time is device time
-    h.session().emitMessage(roundEvent({ type: 'approach', riderId: 'ana', fence: 1, attempt: 1, t0: h.clock.now() + 900 }));
+    h.session().emitMessage(roundEvent({ type: 'approach', riderId: 'ana', fence: 1, attempt: 1, t0: h.clock.now() + 900, speedMps: null }));
     h.game.frame(h.clock.now());
     expect(tap.getAttribute('data-takeoff-at')).toBe(String(h.clock.now() + 1_200)); // another rider's approach changes nothing
     h.clock.t += 1_250;
@@ -2058,12 +2062,12 @@ describe('between the heats and at the end (audit K1 r1 #2)', () => {
 
 describe('taking control back (audit K1 r2 #1)', () => {
   /** The server's 'approach-sync' for the own horse: the approach open now (server time = device time here), or none. */
-  const approachSync = (approach: { fence: number; attempt: number; t0: number } | null, classNumber = 1, heatIndex = 0, hardTurn = false): ServerMessage => ({
+  const approachSync = (approach: { fence: number; attempt: number; t0: number; speedMps?: number | null } | null, classNumber = 1, heatIndex = 0, hardTurn = false): ServerMessage => ({
     type: 'approach-sync',
     classNumber,
     heatIndex,
     hardTurn,
-    approach,
+    approach: approach === null ? null : { speedMps: null, ...approach },
   });
   const tapControl = (h: Harness) => q(h.root, '[data-control="tap"]');
 

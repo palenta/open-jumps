@@ -239,9 +239,60 @@ describe("the 'approach-sync' message (audit K1 r2 #1)", () => {
     room.deliver('approach-sync', { classNumber: 1, heatIndex: 0, hardTurn: false, approach: { fence: 2 } });
     room.deliver('approach-sync', { heatIndex: 0, approach: null });
     expect(messages).toEqual([
-      { type: 'approach-sync', classNumber: 1, heatIndex: 0, hardTurn: true, approach: { fence: 2, attempt: 1, t0: 61_234.5 } },
+      // A server that sends no speed (K1): the approach reads as one without speed (K1.1 step 5).
+      { type: 'approach-sync', classNumber: 1, heatIndex: 0, hardTurn: true, approach: { fence: 2, attempt: 1, t0: 61_234.5, speedMps: null } },
       { type: 'approach-sync', classNumber: 1, heatIndex: 0, hardTurn: false, approach: null },
     ]);
+  });
+});
+
+describe('the approach speed on the wire (K1.1 step 5: speedMps)', () => {
+  /** Speeds a server could send that are no speed: each decodes as an approach without speed. */
+  const NO_SPEED: unknown[] = [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY, 0, -5, '5', null, undefined, {}];
+
+  it("an 'approach-sync' approach with a finite speed above 0 hands it on: 5 m/s, 7 m/s, 6.5 m/s", async () => {
+    const { room, session } = await connected(true);
+    const messages: ServerMessage[] = [];
+    session.onMessage((message) => messages.push(message));
+    for (const speedMps of [5, 7, 6.5]) room.deliver('approach-sync', { classNumber: 1, heatIndex: 0, hardTurn: false, approach: { fence: 1, attempt: 1, t0: 6_000, speedMps } });
+    expect(messages.map((m) => (m.type === 'approach-sync' ? m.approach?.speedMps : 'other'))).toEqual([5, 7, 6.5]);
+  });
+
+  it("an 'approach-sync' approach whose speed is not a finite number above 0 is an approach without speed — never dropped", async () => {
+    const { room, session } = await connected(true);
+    const messages: ServerMessage[] = [];
+    session.onMessage((message) => messages.push(message));
+    for (const speedMps of NO_SPEED) room.deliver('approach-sync', { classNumber: 1, heatIndex: 0, hardTurn: false, approach: { fence: 1, attempt: 1, t0: 6_000, speedMps } });
+    expect(messages).toHaveLength(NO_SPEED.length);
+    for (const message of messages) expect(message).toEqual({ type: 'approach-sync', classNumber: 1, heatIndex: 0, hardTurn: false, approach: { fence: 1, attempt: 1, t0: 6_000, speedMps: null } });
+  });
+
+  it("the 'approach' round event hands on a finite speed above 0 as sent", async () => {
+    const { room, session } = await connected(true);
+    const messages: ServerMessage[] = [];
+    session.onMessage((message) => messages.push(message));
+    room.deliver('round-event', { type: 'approach', riderId: 'host', fence: 1, attempt: 1, t0: 6_000, speedMps: 5 });
+    expect(messages).toEqual([{ type: 'round-event', event: { type: 'approach', riderId: 'host', fence: 1, attempt: 1, t0: 6_000, speedMps: 5 } }]);
+  });
+
+  it("the 'approach' round event with no speed, or one that is not a finite number above 0, arrives with speedMps null", async () => {
+    const { room, session } = await connected(true);
+    const messages: ServerMessage[] = [];
+    session.onMessage((message) => messages.push(message));
+    for (const speedMps of NO_SPEED) room.deliver('round-event', { type: 'approach', riderId: 'host', fence: 1, attempt: 1, t0: 6_000, speedMps });
+    room.deliver('round-event', { type: 'approach', riderId: 'host', fence: 1, attempt: 1, t0: 6_000 });
+    expect(messages).toHaveLength(NO_SPEED.length + 1);
+    for (const message of messages) {
+      expect(message).toEqual({ type: 'round-event', event: { type: 'approach', riderId: 'host', fence: 1, attempt: 1, t0: 6_000, speedMps: null } });
+    }
+  });
+
+  it('negative: the other round events are handed on as they came (no speed is added to them)', async () => {
+    const { room, session } = await connected(true);
+    const messages: ServerMessage[] = [];
+    session.onMessage((message) => messages.push(message));
+    room.deliver('round-event', { type: 'turn-ahead', riderId: 'host', distanceM: 45, at: 9_000 });
+    expect(messages).toEqual([{ type: 'round-event', event: { type: 'turn-ahead', riderId: 'host', distanceM: 45, at: 9_000 } }]);
   });
 });
 

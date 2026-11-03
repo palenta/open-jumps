@@ -145,7 +145,12 @@ export type ClientRoomMessage =
   | { type: 'clock-pong'; serverSent: number; clientTime: number };
 
 export type RoundEventWire = { riderId: string } & (
-  | { type: 'approach'; fence: number; attempt: number; t0: number }
+  /**
+   * The own or another horse's approach opened: t0 in server ms; speedMps (K1.1 step 5) the approach speed the server
+   * froze at the zone entry, m/s — as decoded by the session: null when the server's value is not a finite number
+   * above 0 (an approach without speed: the take-off marker only as an outline, the own horse drawn from the patch).
+   */
+  | { type: 'approach'; fence: number; attempt: number; t0: number; speedMps: number | null }
   | { type: 'takeoff'; fence: number; attempt: number; decidedAt: number; offsetMs: number | null; outcome: TakeoffOutcome; approach: ApproachState }
   | { type: 'turn-ahead'; distanceM: number; at: number }
   | { type: 'turn'; distanceM: number; decidedAt: number; outcome: TurnOutcome }
@@ -188,9 +193,10 @@ export type ServerMessage =
   /**
    * To a rider of the running heat who takes control back (a reconnection by token, or a fresh join during the heat),
    * to that connection only: the approach the server has open for the own horse right now and still undecided, or
-   * null when none is (between fences, in flight, stopped), with the hard-turn flag in force (audit K1 r2 #1).
+   * null when none is (between fences, in flight, stopped), with the hard-turn flag in force (audit K1 r2 #1). The
+   * approach carries its frozen speedMps (K1.1 step 5), decoded as in the 'approach' event (null: without speed).
    */
-  | { type: 'approach-sync'; classNumber: number; heatIndex: number; hardTurn: boolean; approach: { fence: number; attempt: number; t0: number } | null }
+  | { type: 'approach-sync'; classNumber: number; heatIndex: number; hardTurn: boolean; approach: { fence: number; attempt: number; t0: number; speedMps: number | null } | null }
   | { type: 'class-table'; table: ClassTableWire }
   | { type: 'refused'; error: string }
   | { type: 'emote'; from: string; emote: EmoteId };

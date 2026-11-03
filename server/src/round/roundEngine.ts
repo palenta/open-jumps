@@ -213,10 +213,11 @@ export class RoundEngine {
   }
 
   /**
-   * A rider's undecided approach (CourseRunner.undecidedApproach) and the hard-turn flag in force, for a client that
-   * takes control back (audit K1 r2 #1); null for a rider who is not in this round.
+   * A rider's undecided approach (CourseRunner.undecidedApproach, with its frozen speedMps — K1.1 step 5) and the
+   * hard-turn flag in force, for a client that takes control back (audit K1 r2 #1); null for a rider who is not in
+   * this round.
    */
-  approachOf(riderId: string): { approach: { fence: number; attempt: number; t0: number } | null; hardTurn: boolean } | null {
+  approachOf(riderId: string): { approach: { fence: number; attempt: number; t0: number; speedMps: number } | null; hardTurn: boolean } | null {
     const entry = this.byId.get(riderId);
     if (!entry) return null;
     return { approach: entry.runner.undecidedApproach(), hardTurn: entry.runner.snapshot().recentHardTurn };

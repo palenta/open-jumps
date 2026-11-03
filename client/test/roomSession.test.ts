@@ -103,6 +103,8 @@ describe('RoomSession', () => {
     expect(seat.states).toBeGreaterThan(statesBefore);
     await until(() => events(seat, 'approach', host.profile.id).length > 0, 8000, 'the approach');
     const approach = events(seat, 'approach', host.profile.id)[0] as Extract<RoundEventWire, { type: 'approach' }>;
+    // K1.1 step 5: the approach speed the server froze (collected canter, 5 m/s) arrives with the event.
+    expect(approach.speedMps).toBe(5);
     const tapAt = host.clock.toClient(approach.t0);
     if (tapAt === null) throw new Error('clock not ready');
     await sleep(Math.max(0, tapAt + 100 - host.clock.now())); // aim 100 ms after t0: the clean tier, not perfect
