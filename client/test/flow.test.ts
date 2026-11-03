@@ -69,6 +69,7 @@ class Player {
     const event = m.event;
     if (event.type === 'approach') {
       this.hint.approach(event);
+      this.controller.approach(event);
       if (this.tapOffsetMs === null) return;
       const tapAt = this.device.clock.toClient(event.t0);
       if (tapAt === null) throw new Error('clock not ready at the approach');
@@ -83,6 +84,7 @@ class Player {
       }, Math.max(0, tapAt + this.tapOffsetMs - this.device.clock.now()));
     } else if (event.type === 'takeoff') {
       const reconciliation = this.hint.verdict(event);
+      this.controller.approachClosed();
       this.reconciliations.push(reconciliation);
       this.caption = event.outcome.label;
     }

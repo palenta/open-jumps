@@ -418,6 +418,8 @@ const approach70: ApproachState = { gear: 'collected', heightClass: 70, angleSha
 
 /** The server's verdict "a late tap, front rail" (the judge's chip outcome). */
 const chip: TakeoffOutcome = { kind: 'chip', faults: 4, cleared: true, label: 'batida_corta', horseJumped: true };
+/** The server's verdict "clean" (the fence is cleared, no faults). */
+const clean: TakeoffOutcome = { kind: 'clean', faults: 0, cleared: true, label: 'cero_faltas', horseJumped: true };
 
 const table: ClassTableWire = {
   '70': [
@@ -649,6 +651,18 @@ async function inRound(): Promise<Harness> {
   startClass(h);
   await settle();
   expect(h.root.dataset.screen).toBe('round');
+  return h;
+}
+
+/** The server opens the own horse's approach of `fence`, `attempt` with the take-off moment `t0` (server time = device time here). */
+function approachOwn(h: Harness, fence = 1, attempt = 1, t0 = h.clock.now() + 1_000): void {
+  h.session().emitMessage(roundEvent({ type: 'approach', riderId: 'host', fence, attempt, t0 }));
+}
+
+/** The host in heat 1 of class 1 with the approach of fence 1, attempt 1 open (t0 one second ahead): the tap is armed. */
+async function inApproach(): Promise<Harness> {
+  const h = await inRound();
+  approachOwn(h);
   return h;
 }
 
@@ -1050,18 +1064,56 @@ describe('the round screen', () => {
 });
 
 describe('pointer presses on the arena', () => {
-  it('a press in the tap zone sends the take-off tap stamped with the device clock for fence 1, attempt 1', async () => {
-    const h = await inRound();
+  it('a press in the tap zone during the open approach sends the take-off tap stamped with the device clock for fence 1, attempt 1', async () => {
+    const h = await inApproach();
     press(h, TAP);
     expect(h.session().sentOf('tap')).toEqual([{ type: 'tap', clientTime: h.clock.now(), fence: 1, attempt: 1 }]);
   });
 
-  it('a second press in the tap zone during the same attempt sends nothing', async () => {
-    const h = await inRound();
+  it('a second press in the tap zone during the same approach sends nothing', async () => {
+    const h = await inApproach();
     press(h, TAP);
     h.clock.t += 50;
     press(h, TAP);
     expect(h.session().sentOf('tap')).toHaveLength(1);
+  });
+
+  it('a press in the tap zone before the first approach sends nothing and spends nothing: the tap of the approach that follows goes out (audit K1 r1 #1)', async () => {
+    const h = await inRound();
+    press(h, TAP);
+    h.clock.t += 500;
+    press(h, TAP);
+    expect(h.session().sentOf('tap')).toEqual([]);
+    approachOwn(h);
+    h.clock.t += 1_000;
+    press(h, TAP);
+    expect(h.session().sentOf('tap')).toEqual([{ type: 'tap', clientTime: h.clock.now(), fence: 1, attempt: 1 }]);
+  });
+
+  it('fence 1 cleared → an early press during the flight, when the state already names fence 2, sends nothing → the approach of fence 2 arms the tap and it goes out for fence 2, attempt 1 (audit K1 r1 #1)', async () => {
+    const h = await inApproach();
+    h.clock.t += 1_000;
+    press(h, TAP);
+    const first = { type: 'tap' as const, clientTime: h.clock.now(), fence: 1, attempt: 1 };
+    expect(h.session().sentOf('tap')).toEqual([first]);
+    // The verdict: cleared. The server names fence 2 from the decision on; the horse lands 600 ms later.
+    h.clock.t += 60;
+    h.session().emitMessage(roundEvent({ type: 'takeoff', riderId: 'host', fence: 1, attempt: 1, decidedAt: h.clock.now(), offsetMs: 0, outcome: clean, approach: approach70 }));
+    h.session().emitState(ridingState({ riders: { host: rider('host', { nextFence: 2, positionM: 30 }), ana: rider('ana') } }));
+    h.clock.t += 200;
+    press(h, TAP); // an eager finger during the flight: with the old controller this spent the tap of fence 2
+    h.clock.t += 200;
+    press(h, TAP);
+    expect(h.session().sentOf('tap')).toEqual([first]);
+    expect(q(h.root, '[data-control="tap"]').hasAttribute('data-armed')).toBe(false);
+    // The approach of fence 2 opens: the finger at its t0 is the tap the server accepts.
+    h.clock.t += 4_000;
+    approachOwn(h, 2, 1, h.clock.now() + 1_000);
+    h.game.frame(h.clock.now());
+    expect(q(h.root, '[data-control="tap"]').getAttribute('data-armed')).toBe('true');
+    h.clock.t += 1_000;
+    press(h, TAP);
+    expect(h.session().sentOf('tap')).toEqual([first, { type: 'tap', clientTime: h.clock.now(), fence: 2, attempt: 1 }]);
   });
 
   it('a press on the pace square cycles the gear to extended and the HUD shows it', async () => {
@@ -1122,6 +1174,7 @@ describe('pointer presses on the arena', () => {
     expect(h.session().sent).toHaveLength(2);
     // The tap zone: arena-local x 378..620, y 55..277 → client x 422..664, y 85..307; (650, 90) is local (606, 60),
     // inside — untranslated x 650 would be right of the zone.
+    approachOwn(h);
     press(h, [650, 90]);
     expect(h.session().sentOf('tap')).toEqual([{ type: 'tap', clientTime: h.clock.now(), fence: 1, attempt: 1 }]);
   });
@@ -1155,7 +1208,7 @@ describe('pointer presses on the arena', () => {
   });
 
   it('a new class re-creates the round modules: the tap for fence 1, attempt 1 goes out again', async () => {
-    const h = await inRound();
+    const h = await inApproach();
     press(h, TAP);
     expect(h.session().sentOf('tap')).toHaveLength(1);
     await inResults(h);
@@ -1163,6 +1216,7 @@ describe('pointer presses on the arena', () => {
     startClass(h, 2);
     await settle();
     expect(h.root.dataset.screen).toBe('round');
+    approachOwn(h);
     press(h, TAP);
     expect(h.session().sentOf('tap')).toEqual([
       { type: 'tap', clientTime: 10_000, fence: 1, attempt: 1 },

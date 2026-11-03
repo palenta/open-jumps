@@ -161,7 +161,10 @@ interface RoundModules {
  *   needsRotation(rect.width, rect.height). While the own horse's approach is open (from the 'approach' event
  *   until the 'takeoff' verdict) the tap control carries data-armed="true" and data-takeoff-at = clock.toClient(t0)
  *   (the device time of the take-off moment in the clock's own units — performance.now() ms in the browser), so
- *   the player sees the zone light up and a test can time its finger; both attributes go at the verdict.
+ *   the player sees the zone light up and a test can time its finger; both attributes go at the verdict. The
+ *   take-off tap itself is armed by the same two events (InputController.approach / approachClosed): a finger on
+ *   the tap zone between approaches — before the first one, or during the flight after a cleared fence, when the
+ *   state already names the next fence — sends nothing and spends nothing (audit K1 r1 #1).
  *   The round-side modules (InstantHint, InputController, RemoteInterpolator, RoundClockEstimate) are created
  *   anew at every class-course message, so a new class starts clean (a new round key, an empty buffer: the other
  *   horses are drawn from the new class's samples only, never from the last class's positions).
@@ -315,6 +318,7 @@ export function createGame(deps: GameDeps): Game {
       case 'approach':
         if (own) {
           round.hint.approach(event);
+          round.controller.approach(event);
           const takeoffAt = deps.clock.toClient(event.t0);
           round.armed = takeoffAt === null ? null : { fence: event.fence, attempt: event.attempt, takeoffAt };
         }
@@ -322,6 +326,7 @@ export function createGame(deps: GameDeps): Game {
       case 'takeoff':
         if (own) {
           round.hint.verdict(event);
+          round.controller.approachClosed();
           round.armed = null;
         }
         round.caption = { event: { type: 'takeoff', label: event.outcome.label, fence: event.fence }, riderId: event.riderId };
