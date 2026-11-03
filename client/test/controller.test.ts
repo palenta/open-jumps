@@ -263,6 +263,60 @@ describe('InputController direction buttons inside a turn window', () => {
   });
 });
 
+describe('InputController turn window: a start as well as an end (audit K1 r5 #2)', () => {
+  it('a finger before the window opened, handled after it (age < 300 ms), is a line shift and spends no turn: the next press in the window is the turn', () => {
+    const { input, sent } = ridingController();
+    input.turnAhead(10_000); // the 'turn-ahead' handled at 10 000
+    // The finger landed at 9 990, before the window; its handler ran at 10 020 (30 ms old, well under the judge's limit).
+    expect(input.press('turn-left', 9_990, 10_020)).toEqual({ type: 'line', line: 'angle' });
+    expect(input.requestedLine).toBe('angle');
+    // The window is still open: the deliberate right turn goes out as the turn, not as a line shift.
+    expect(input.press('turn-right', 10_400, 10_410)).toEqual({ type: 'turn', choice: 'right', clientTime: 10_400 });
+    expect(sent).toEqual([
+      { type: 'line', line: 'angle' },
+      { type: 'turn', choice: 'right', clientTime: 10_400 },
+    ]);
+  });
+
+  it('the window is [opened, opened + turnWindowMs): a press exactly at the opening is a turn, one millisecond before it a line shift', () => {
+    const atOpen = ridingController();
+    atOpen.input.turnAhead(10_000);
+    expect(atOpen.input.press('turn-right', 10_000, 10_000)).toEqual({ type: 'turn', choice: 'right', clientTime: 10_000 });
+
+    const before = ridingController();
+    before.input.turnAhead(10_000);
+    expect(before.input.press('turn-right', 9_999, 10_005)).toEqual({ type: 'line', line: 'angle' });
+    expect(before.input.press('turn-right', 10_000, 10_006)).toEqual({ type: 'turn', choice: 'right', clientTime: 10_000 });
+  });
+
+  it('a new window moves both bounds: a press before its opening is a line shift, even inside the span of the window before', () => {
+    // Closed by the turn, then opened again.
+    const taken = ridingController();
+    taken.input.turnAhead(7_000);
+    taken.input.turnTaken();
+    taken.input.turnAhead(9_000);
+    expect(taken.input.press('turn-left', 8_990, 9_010)).toEqual({ type: 'line', line: 'angle' });
+    expect(taken.input.press('turn-left', 9_100, 9_110)).toEqual({ type: 'turn', choice: 'left', clientTime: 9_100 });
+    // Opened again while the first one would still be open (the next turn point is close): the new start counts.
+    const reopened = ridingController();
+    reopened.input.turnAhead(7_000);
+    reopened.input.turnAhead(9_000);
+    expect(reopened.input.press('turn-left', 8_990, 9_010)).toEqual({ type: 'line', line: 'angle' });
+    expect(reopened.input.press('turn-right', 9_000 + INPUT.turnWindowMs - 1, 9_000 + INPUT.turnWindowMs + 10)).toEqual({
+      type: 'turn',
+      choice: 'right',
+      clientTime: 9_000 + INPUT.turnWindowMs - 1,
+    });
+  });
+
+  it('a turn that went out closes the window at both ends: a press stamped inside its span afterwards is a line shift', () => {
+    const { input } = ridingController();
+    input.turnAhead(10_000);
+    expect(input.press('turn-left', 10_200, 10_210)).toEqual({ type: 'turn', choice: 'left', clientTime: 10_200 });
+    expect(input.press('turn-left', 10_150, 10_260)).toEqual({ type: 'line', line: 'angle' });
+  });
+});
+
 describe('InputController unknown control', () => {
   it('a press on an unknown control is null and sends nothing', () => {
     const { input, sent } = ridingController();

@@ -4,15 +4,15 @@
 // nor remembered, so it can never spend the tap of the attempt that follows (audit K1 r1 #1: the state names the
 // next fence from the decision on, 600 ms before the horse even lands); a client that takes control back after a
 // drop is told the approach in progress by the server's 'approach-sync' instead (audit K1 r2 #1), and an attempt
-// whose tap already went out is never armed twice; 'left' / 'right' are a turn while a turn window is open,
-// otherwise a line shift; the pace button cycles the gear. A timed press (the tap, a turn) handled too late for the
-// judge to accept is not sent at all (audit K1 r4 #1).
+// whose tap already went out is never armed twice; 'left' / 'right' are a turn when pressed inside a turn window
+// (from its opening to its end, audit K1 r5 #2), otherwise a line shift; the pace button cycles the gear. A timed
+// press (the tap, a turn) handled too late for the judge to accept is not sent at all (audit K1 r4 #1).
 import { PACKET, type Gear } from '@open-jumps/shared';
 import type { Control } from './layout.js';
 import type { ClientRoomMessage } from '../net/types.js';
 
 export const INPUT = {
-  /** How long after a 'turn-ahead' the direction buttons mean a turn (zone 10 m ≈ 2 s before the turn moment, plus the late window). */
+  /** How long after the 'turn-ahead' is handled the direction buttons mean a turn (zone 10 m ≈ 2 s before the turn moment, plus the late window). */
   turnWindowMs: 3500,
   gearOrder: ['collected', 'extended', 'gallop'] as const,
   /**
@@ -72,10 +72,15 @@ export interface InputControllerDeps {
  *   a press is never re-timed to handledAt: that would turn a finger that landed before the window into a fresh
  *   take-off or turn. The gear and the line carry no time and go out whatever the age of the press; whether a
  *   direction press is a turn or a line shift is decided at its own moment (clientTime), not at its handling.
- * - turnAhead() opens the turn window for turnWindowMs (or until turnTaken()); a 'turn-left'/'turn-right' press
- *   inside it sends {type:'turn', choice, clientTime} and closes the window; outside it sends a line toggle
- *   {type:'line', line} (center ↔ angle); the gear press sends the next gear of INPUT.gearOrder (cyclic),
- *   starting from 'collected'.
+ * - turnAhead(now) opens the turn window [now, now + turnWindowMs) — `now` is the clock read while the 'turn-ahead'
+ *   is handled, the same clock and units as every press's clientTime — until it ends or turnTaken() closes it; a new
+ *   turnAhead replaces both bounds. A 'turn-left'/'turn-right' press whose moment is inside the window — at or after
+ *   its opening and strictly before its end — sends {type:'turn', choice, clientTime} and closes the window; any
+ *   other press on them sends a line toggle {type:'line', line} (center ↔ angle) and leaves the window as it is. A
+ *   finger that landed before the window opened is a line shift even when it is handled after the opening (audit K1
+ *   r5 #2): the rider could not have meant the turn she had not been shown yet, and taking it for one would spend
+ *   the turn ('wrong' for the other direction: a 6 s stop) and send her deliberate turn as a line shift. Exactly at
+ *   the opening is inside. The gear press sends the next gear of INPUT.gearOrder (cyclic), starting from 'collected'.
  */
 export class InputController {
   private readonly send: (message: ClientRoomMessage) => boolean;
@@ -84,8 +89,8 @@ export class InputController {
   private open: (OpenApproach & { tapped: boolean }) | null = null;
   /** The approach whose tap went out last in this round: that attempt is never armed again. */
   private lastTap: OpenApproach | null = null;
-  /** Device time until which a direction press is a turn; null when no window is open. */
-  private turnWindowUntil: number | null = null;
+  /** The turn window in device time, [from, until): a direction press at a moment inside it is a turn; null when closed. */
+  private turnWindow: { from: number; until: number } | null = null;
   private gear: Gear = 'collected';
   private line: 'center' | 'angle' = 'center';
 
@@ -124,12 +129,14 @@ export class InputController {
     return this.open !== null && !this.open.tapped;
   }
 
+  /** The 'turn-ahead' of the own horse was handled at `now` (the clock of every clientTime): the window [now, now + turnWindowMs). */
   turnAhead(now: number): void {
-    this.turnWindowUntil = now + INPUT.turnWindowMs;
+    this.turnWindow = { from: now, until: now + INPUT.turnWindowMs };
   }
 
+  /** The server decided the turn: the window is closed at both ends. */
   turnTaken(): void {
-    this.turnWindowUntil = null;
+    this.turnWindow = null;
   }
 
   press(control: Control, clientTime: number, handledAt: number = clientTime): ClientRoomMessage | null {
@@ -150,7 +157,7 @@ export class InputController {
         this.gear = message.gear;
         break;
       case 'turn':
-        this.turnWindowUntil = null;
+        this.turnWindow = null;
         break;
       case 'line':
         this.line = message.line;
@@ -175,11 +182,14 @@ export class InputController {
         return { type: 'gear', gear: order[(index + 1) % order.length] ?? order[0] };
       }
       case 'turn-left':
-      case 'turn-right':
-        if (this.turnWindowUntil !== null && clientTime < this.turnWindowUntil) {
+      case 'turn-right': {
+        // A turn only at a moment inside the window, never before its opening (audit K1 r5 #2).
+        const turnWindow = this.turnWindow;
+        if (turnWindow !== null && clientTime >= turnWindow.from && clientTime < turnWindow.until) {
           return { type: 'turn', choice: control === 'turn-left' ? 'left' : 'right', clientTime };
         }
         return { type: 'line', line: this.line === 'center' ? 'angle' : 'center' };
+      }
       default:
         return null;
     }

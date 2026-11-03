@@ -1673,6 +1673,32 @@ describe('the moment of a press is the moment of the touch, not of its handling 
   });
 });
 
+describe('the turn window opens when the turn-ahead is handled: a finger before it is no turn (audit K1 r5 #2)', () => {
+  it('a finger 10 ms before the turn-ahead, handled 20 ms after it (30 ms old): a line shift that spends no turn — the deliberate right turn that follows is the turn', async () => {
+    const h = await inRound();
+    const opened = h.clock.now();
+    h.session().emitMessage(roundEvent({ type: 'turn-ahead', riderId: 'host', distanceM: 45, at: opened }));
+    h.clock.t = opened + 20;
+    press(h, TURN_LEFT, opened - 10); // meant as a line shift before the turn: never the 'wrong' turn of the judge
+    expect(h.session().sentOf('line')).toEqual([{ type: 'line', line: 'angle' }]);
+    expect(h.session().sentOf('turn')).toEqual([]);
+    h.clock.t = opened + 410;
+    press(h, TURN_RIGHT, opened + 400);
+    expect(h.session().sentOf('turn')).toEqual([{ type: 'turn', choice: 'right', clientTime: opened + 400 }]);
+    expect(h.session().sentOf('line')).toEqual([{ type: 'line', line: 'angle' }]);
+  });
+
+  it('a finger at the very moment the turn-ahead was handled is inside the window: the turn', async () => {
+    const h = await inRound();
+    const opened = h.clock.now();
+    h.session().emitMessage(roundEvent({ type: 'turn-ahead', riderId: 'host', distanceM: 45, at: opened }));
+    h.clock.t = opened + 30;
+    press(h, TURN_RIGHT, opened);
+    expect(h.session().sentOf('turn')).toEqual([{ type: 'turn', choice: 'right', clientTime: opened }]);
+    expect(h.session().sentOf('line')).toEqual([]);
+  });
+});
+
 describe('a touch too old for the judge when it is handled is not sent (audit K1 r4 #1)', () => {
   const caption = (h: Harness): string => text(h.root.querySelector('[data-hud-caption]'));
   const armed = (h: Harness): string | null => q(h.root, '[data-control="tap"]').getAttribute('data-armed');

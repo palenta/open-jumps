@@ -193,13 +193,17 @@ interface RoundModules {
  *   = clock.now() at handling; a finger outside the rectangle is ignored. The time of a press is the moment of the
  *   touch (audit K1 r3 #4): the event's timeStamp (performance.now() base, the clock's own units in the browser) is
  *   the clientTime of a 'tap' or a 'turn', the moment the turn window is checked against and the moment the instant
- *   hint judges; a timeStamp that cannot be a moment of the clock — not finite, 0 or negative, later than
- *   clock.now() — is another base or none, and clock.now() at handling is used instead. A correct timeStamp is never
- *   replaced, however old (audit K1 r4 #1): a tap, or a direction press that is a turn at its moment, already more
- *   than INPUT.maxPressAgeMs (= PACKET.maxAgeMs, 300 ms: the judge's 'too-old' limit, which no packet handled that
- *   late can meet) before clock.now() when it is handled sends nothing, spends nothing and shows no hint — the tap
- *   zone stays lit and the turn window open, so the next timely press goes out; the gear and a line shift carry no
- *   time and go out whatever the age. [data-hud-fence], [data-hud-faults], [data-hud-time], [data-hud-gear], [data-hud-caption],
+ *   hint judges. The turn window opens when the own horse's 'turn-ahead' is handled, at clock.now() then — the same
+ *   clock and units as pressTime — and lasts INPUT.turnWindowMs: a direction press is a turn only when its moment is
+ *   inside [opened, opened + INPUT.turnWindowMs) — exactly at the opening is inside, exactly at the end is not — and a
+ *   finger that landed before the opening is a line shift even when its handler runs after it, and spends no turn, so
+ *   the next deliberate press in the window is the turn (audit K1 r5 #2). A timeStamp that cannot be a moment of the
+ *   clock — not finite, 0 or negative, later than clock.now() — is another base or none, and clock.now() at handling is
+ *   used instead. A correct timeStamp is never replaced, however old (audit K1 r4 #1): a tap, or a direction press
+ *   that is a turn at its moment, already more than INPUT.maxPressAgeMs (= PACKET.maxAgeMs, 300 ms: the judge's
+ *   'too-old' limit, which no packet handled that late can meet) before clock.now() when it is handled sends nothing,
+ *   spends nothing and shows no hint — the tap zone stays lit and the turn window open, so the next timely press goes
+ *   out; the gear and a line shift carry no time and go out whatever the age. [data-hud-fence], [data-hud-faults], [data-hud-time], [data-hud-gear], [data-hud-caption],
  *   [data-badge] (placeholder art) from hudModel; [data-rotate] is shown (hidden attribute removed) when
  *   needsRotation(rect.width, rect.height), and while it is shown every pointerdown on the arena is ignored (the
  *   hidden zones take no input). While the own horse's approach is open (from the 'approach' event
@@ -409,6 +413,8 @@ export function createGame(deps: GameDeps): Game {
         round.caption = { event: { type: 'takeoff', label: event.outcome.label, fence: event.fence }, riderId: event.riderId };
         break;
       case 'turn-ahead':
+        // The window opens now, on the clock every press is timed by: a finger that landed before this moment is no
+        // turn, however late its handler runs (audit K1 r5 #2).
         if (own) round.controller.turnAhead(deps.clock.now());
         break;
       case 'turn':
