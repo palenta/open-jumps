@@ -45,7 +45,8 @@ export interface ClassTableRow {
 export type ClassTable = Partial<Record<HeightClass, ClassTableRow[]>>;
 
 export type ClassEvent =
-  | { type: 'phase'; phase: ClassPhase; heatIndex: number; at: number }
+  /** A phase began at `at`; `endsAt` is when its timer ends (walk, results) — null for riding (the heat decides) and done. */
+  | { type: 'phase'; phase: ClassPhase; heatIndex: number; at: number; endsAt: number | null }
   | (RoundEvent & { type: RoundEvent['type']; heatIndex: number });
 
 /**
@@ -127,11 +128,22 @@ export class ClassFlow {
     return this.currentPhase === 'riding' ? this.running : null;
   }
 
+  /** When the current phase began (server ms); null before start(). A late joiner is told this with the phase. */
+  get phaseStartedAt(): number | null {
+    return this.phaseAt;
+  }
+
+  /** When the current phase's timer ends (server ms): walk and results have one; riding and done do not (null). */
+  phaseEndsAt(): number | null {
+    if (this.phaseAt === null) return null;
+    return this.timerEnd(this.currentPhase, this.phaseAt);
+  }
+
   /** Begin the first course walk at `now`. */
   start(now: number): void {
     if (this.phaseAt !== null || this.currentPhase === 'done') return;
     this.phaseAt = now;
-    this.pending.push({ type: 'phase', phase: 'walk', heatIndex: this.heatIndex, at: now });
+    this.pending.push(this.phaseEvent('walk', this.heatIndex, now));
   }
 
   /** Advance phases and the running heat to `now`; returns this call's events. */
@@ -156,7 +168,7 @@ export class ClassFlow {
         const endedAt = roundEvents.reduce((latest, e) => ('at' in e ? Math.max(latest, e.at) : 'decidedAt' in e ? Math.max(latest, e.decidedAt) : latest), phaseAt);
         this.currentPhase = 'results';
         this.phaseAt = Math.min(endedAt, now);
-        events.push({ type: 'phase', phase: 'results', heatIndex, at: this.phaseAt });
+        events.push(this.phaseEvent('results', heatIndex, this.phaseAt));
         continue;
       }
       if (this.currentPhase === 'results') {
@@ -167,11 +179,11 @@ export class ClassFlow {
         this.phaseAt = nextAt;
         if (!next) {
           this.currentPhase = 'done';
-          events.push({ type: 'phase', phase: 'done', heatIndex: this.heatIndex, at: nextAt });
+          events.push(this.phaseEvent('done', this.heatIndex, nextAt));
           break;
         }
         this.currentPhase = 'walk';
-        events.push({ type: 'phase', phase: 'walk', heatIndex: next.index, at: nextAt });
+        events.push(this.phaseEvent('walk', next.index, nextAt));
         continue;
       }
       break;
@@ -213,7 +225,7 @@ export class ClassFlow {
     if (!heat) {
       this.currentPhase = 'done';
       this.phaseAt = startAt;
-      events.push({ type: 'phase', phase: 'done', heatIndex: this.heatIndex, at: startAt });
+      events.push(this.phaseEvent('done', this.heatIndex, startAt));
       return;
     }
     const riders = heat.riderIds.map((id) => this.riderById.get(id)).filter((r): r is ClassRider => r !== undefined);
@@ -227,6 +239,17 @@ export class ClassFlow {
     });
     this.currentPhase = 'riding';
     this.phaseAt = startAt;
-    events.push({ type: 'phase', phase: 'riding', heatIndex: heat.index, at: startAt });
+    events.push(this.phaseEvent('riding', heat.index, startAt));
+  }
+
+  private phaseEvent(phase: ClassPhase, heatIndex: number, at: number): ClassEvent {
+    return { type: 'phase', phase, heatIndex, at, endsAt: this.timerEnd(phase, at) };
+  }
+
+  /** The end of a timed phase that began at `at`: the walk and the results run on timers, riding and done do not. */
+  private timerEnd(phase: ClassPhase, at: number): number | null {
+    if (phase === 'walk') return at + this.timing.walkMs;
+    if (phase === 'results') return at + this.timing.resultsMs;
+    return null;
   }
 }

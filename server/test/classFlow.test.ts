@@ -115,6 +115,42 @@ describe('phases and heats', () => {
     expect(table[70]?.every((row) => row.place === null)).toBe(true);
   });
 
+  it('every phase event says when the phase began and when its timer ends: walk → at + walkMs, results → at + resultsMs, riding and done have no timer (audit K1 r1 #6)', () => {
+    const flow = new ClassFlow(setup());
+    flow.start(0);
+    const events: ClassEvent[] = [];
+    drive(flow, 0, 90000, ['ana'], events);
+    const phases = events.filter((e): e is Extract<ClassEvent, { type: 'phase' }> => e.type === 'phase');
+    expect(phases.map((p) => [p.phase, p.endsAt === null ? null : p.endsAt - p.at])).toEqual([
+      ['walk', 1000],
+      ['riding', null],
+      ['results', 500],
+      ['walk', 1000],
+      ['riding', null],
+      ['results', 500],
+      ['done', null],
+    ]);
+    // The timer of one phase is the start of the next: the second walk begins when the first results end.
+    expect(phases[3]?.at).toBe(phases[2]?.endsAt);
+    expect(phases[4]?.at).toBe(phases[3]?.endsAt);
+  });
+
+  it('phaseStartedAt and phaseEndsAt describe the phase in progress, for a late joiner (audit K1 r1 #6)', () => {
+    const flow = new ClassFlow(setup());
+    expect(flow.phaseStartedAt).toBeNull();
+    expect(flow.phaseEndsAt()).toBeNull();
+    flow.start(100);
+    expect(flow.phaseStartedAt).toBe(100);
+    expect(flow.phaseEndsAt()).toBe(1100);
+    drive(flow, 100, 1100);
+    expect(flow.phase).toBe('riding');
+    expect(flow.phaseStartedAt).toBe(1100);
+    expect(flow.phaseEndsAt()).toBeNull();
+    drive(flow, 1100, 90000, ['ana']);
+    expect(flow.phase).toBe('done');
+    expect(flow.phaseEndsAt()).toBeNull();
+  });
+
   it('a rider who leaves mid-heat is eliminated "disconnected", the heat continues, and they are out of later heats', () => {
     const flow = new ClassFlow(setup());
     flow.start(0);

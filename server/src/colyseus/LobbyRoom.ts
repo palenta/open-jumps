@@ -46,8 +46,11 @@ export interface LobbyRoomDeps {
  *   apart); the client answers 'clock-pong' { serverSent, clientTime }; rider commands carry clientTime and are
  *   translated with that session's ClockSync — until it is ready they are refused ('clock-not-ready').
  * - Phases in the state: 'lobby' → 'walk' → 'riding' → 'results' (per heat) → 'done'; 'class-phase' is also sent
- *   as a message { phase, heatIndex }. During 'riding' the state's `riders` map (riders of the running heat only)
- *   and roundClockMs follow the engine every tick; spectators see the arena but cannot drive anything.
+ *   as a message { phase, heatIndex, startedAt, endsAt } with the server's clock: when the phase began and when
+ *   its timer ends (walk, results; null for riding and done), so a client paces the course walk from the server's
+ *   times and never from a constant of its own (audit K1 r1 #6). During 'riding' the state's `riders` map (riders
+ *   of the running heat only) and roundClockMs follow the engine every tick; spectators see the arena but cannot
+ *   drive anything.
  * - Rider commands ('tap', 'turn', 'gear', 'line') are accepted only from riders of the running heat and always
  *   act on the sender's own horse (there is no horse id in the message, plan 2.3 / matrix row 20); anyone else is
  *   refused ('not-riding'). Take-off and turn decisions are broadcast as 'round-event' { riderId, ...event }.
@@ -59,6 +62,8 @@ export interface LobbyRoomDeps {
  *   'disconnected'); the heat goes on, also with no client connected at all.
  * - When a heat ends, every result is written with results.insertOnce; the class table is sent as 'class-table'
  *   { table } to everyone when the class is done, and to any client that joins while the class is already done.
+ *   A client joining during a class gets 'class-course', then 'class-phase' for the phase in progress (with its
+ *   startedAt / endsAt), then — once done — 'class-table'.
  * - The class is ticked from one `now` per tick (deps.clock) for every rider; the live room keeps ticking with
  *   zero clients connected (its lifetime follows the directory entry, never a reservation timeout), so a heat
  *   finishes — and its results are written — even if every rider dropped. The injected `course` is used as is
@@ -370,8 +375,13 @@ export class LobbyRoom extends Room<{ state: LobbyState }> {
     this.syncDoor();
     this.startClockSync(client);
     if (this.heatRiders.has(accountId)) this.flow?.riderReconnected(accountId, this.serverNow());
-    // A late joiner learns the class in progress: its course (for the arena and the walk) and, once done, the table.
-    if (this.flow !== null && this.course !== null) client.send('class-course', { course: this.course, classNumber: this.classNumber });
+    // A late joiner learns the class in progress: its course (for the arena and the walk), the phase with its clock,
+    // and, once done, the table.
+    if (this.flow !== null && this.course !== null) {
+      client.send('class-course', { course: this.course, classNumber: this.classNumber });
+      const startedAt = this.flow.phaseStartedAt;
+      if (startedAt !== null) client.send('class-phase', { phase: this.flow.phase, heatIndex: this.flow.heatIndex, startedAt, endsAt: this.flow.phaseEndsAt() });
+    }
     if (this.flow?.phase === 'done' && this.lastTable !== null) client.send('class-table', { table: this.lastTable });
   }
 
@@ -566,7 +576,7 @@ export class LobbyRoom extends Room<{ state: LobbyState }> {
         this.lastTable = flow.table();
         this.broadcast('class-table', { table: this.lastTable });
       }
-      this.broadcast('class-phase', { phase: event.phase, heatIndex: event.heatIndex });
+      this.broadcast('class-phase', { phase: event.phase, heatIndex: event.heatIndex, startedAt: event.at, endsAt: event.endsAt });
       return;
     }
     this.broadcast('round-event', event);

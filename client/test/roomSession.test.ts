@@ -7,7 +7,7 @@ import type { LobbyState } from '../../server/src/colyseus/LobbyRoom.js';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { RoomSession, type SessionStatus } from '../src/net/roomSession.js';
 import { KICKED_CLOSE_CODE, type RoundEventWire, type ServerMessage } from '../src/net/types.js';
-import { bootApp, LIVE_COURSE, newDevice, sleep, until, type Device, type LiveApp } from './helpers.js';
+import { bootApp, LIVE_COURSE, newDevice, sleep, TIMING, until, type Device, type LiveApp } from './helpers.js';
 
 /** An application close code that is a plain drop to the server (anything but consented 4000, kicked 4100, revoked 4101). */
 const DROP_CODE = 4005;
@@ -86,7 +86,13 @@ describe('RoomSession', () => {
     expect(seat.messages.find((m) => m.type === 'class-course')).toEqual({ type: 'class-course', course: LIVE_COURSE, classNumber: 1 });
     expect(seat.session.course()).toEqual(LIVE_COURSE);
     await until(() => seat.session.state?.phase === 'riding', 5000, "phase 'riding'");
-    expect(seat.messages.filter((m) => m.type === 'class-phase').map((m) => (m as { phase: string }).phase)).toEqual(['walk', 'riding']);
+    const phases = seat.messages.filter((m): m is Extract<ServerMessage, { type: 'class-phase' }> => m.type === 'class-phase');
+    expect(phases.map((m) => m.phase)).toEqual(['walk', 'riding']);
+    // The phase contract carries the server's own clock (audit K1 r1 #6): when the phase began and when its timer ends.
+    const walk = phases[0];
+    if (!walk) throw new Error('no walk phase');
+    expect(walk).toMatchObject({ heatIndex: 0, startedAt: expect.any(Number), endsAt: walk.startedAt + TIMING.walkMs });
+    expect(phases[1]).toMatchObject({ heatIndex: 0, startedAt: walk.endsAt, endsAt: null });
     expect(seat.states).toBeGreaterThan(statesBefore);
     await until(() => events(seat, 'approach', host.profile.id).length > 0, 8000, 'the approach');
     const approach = events(seat, 'approach', host.profile.id)[0] as Extract<RoundEventWire, { type: 'approach' }>;
@@ -122,6 +128,19 @@ describe('RoomSession', () => {
     const friendSeat = await sit(friend, roomId, code);
     await until(() => friendSeat.session.course() !== null, 2000, 'the course for the late joiner');
     expect(friendSeat.session.course()).toEqual(LIVE_COURSE);
+    // …and the phase in progress with its clock, right after the course (audit K1 r1 #6).
+    await until(() => friendSeat.messages.some((m) => m.type === 'class-phase'), 2000, 'the phase for the late joiner');
+    const types = friendSeat.messages.map((m) => m.type).filter((type) => type === 'class-course' || type === 'class-phase');
+    expect(types.slice(0, 2)).toEqual(['class-course', 'class-phase']);
+    const phase = friendSeat.messages.find((m): m is Extract<ServerMessage, { type: 'class-phase' }> => m.type === 'class-phase');
+    if (!phase) throw new Error('no phase message');
+    expect(phase.heatIndex).toBe(0);
+    expect(phase.startedAt).toEqual(expect.any(Number));
+    if (phase.phase === 'walk') expect(phase.endsAt).toBe(phase.startedAt + TIMING.walkMs);
+    else {
+      expect(phase.phase).toBe('riding'); // the 500 ms walk may be over by the time she is seated
+      expect(phase.endsAt).toBeNull();
+    }
     await friendSeat.session.leave();
     await hostSeat.session.leave();
   }, 20000);

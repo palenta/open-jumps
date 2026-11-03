@@ -266,7 +266,13 @@ function decode(type: string, payload: unknown): ServerMessage | null {
     case 'class-course':
       return { type, course: p.course as CourseSpec, classNumber: typeof p.classNumber === 'number' ? p.classNumber : 0 };
     case 'class-phase':
-      return { type, phase: p.phase as Exclude<LobbyStateSnapshot['phase'], 'lobby'>, heatIndex: typeof p.heatIndex === 'number' ? p.heatIndex : -1 };
+      return {
+        type,
+        phase: p.phase as Exclude<LobbyStateSnapshot['phase'], 'lobby'>,
+        heatIndex: typeof p.heatIndex === 'number' ? p.heatIndex : -1,
+        startedAt: typeof p.startedAt === 'number' ? p.startedAt : 0,
+        endsAt: typeof p.endsAt === 'number' ? p.endsAt : null,
+      };
     case 'round-event':
       return { type, event: payload as Extract<ServerMessage, { type: 'round-event' }>['event'] };
     case 'class-table':

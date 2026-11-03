@@ -162,7 +162,8 @@ export type ClassTableWire = Record<string, ClassTableRowWire[]>;
 export type ServerMessage =
   | { type: 'clock-ping'; serverSent: number }
   | { type: 'class-course'; course: CourseSpec; classNumber: number }
-  | { type: 'class-phase'; phase: Exclude<RoomPhase, 'lobby'>; heatIndex: number }
+  /** A phase began at `startedAt` (server ms); `endsAt` is when its timer ends — walk and results — or null (riding, done). */
+  | { type: 'class-phase'; phase: Exclude<RoomPhase, 'lobby'>; heatIndex: number; startedAt: number; endsAt: number | null }
   | { type: 'round-event'; event: RoundEventWire }
   | { type: 'class-table'; table: ClassTableWire }
   | { type: 'refused'; error: string }

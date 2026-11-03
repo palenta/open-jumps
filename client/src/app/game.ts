@@ -104,9 +104,6 @@ export interface Game {
   destroy(): void;
 }
 
-/** The course walk lasts this long on the client's clock (the server's CLASS_TIMING.walkMs; the client is not told). */
-const WALK_MS = 10_000;
-
 const CONTROLS: Control[] = ['turn-left', 'turn-right', 'gear', 'tap'];
 
 /** Everything the client keeps for one class: re-created at every class-course, so a new class starts clean. */
@@ -122,8 +119,11 @@ interface RoundModules {
   armed: { fence: number; attempt: number; takeoffAt: number } | null;
   /** The last captioned event and whose horse it was (re-rendered in the locale of the moment). */
   caption: { event: CaptionEvent; riderId: string } | null;
-  /** When the course walk began on the device clock. */
-  walkStartedAt: number | null;
+  /**
+   * The course walk in progress as the server announced it ('class-phase' walk), in DEVICE time: the fly-over paces
+   * itself over [startedAt, endsAt]. Null until the message arrives and again for a walk of another heat.
+   */
+  walk: { heatIndex: number; startedAt: number; endsAt: number } | null;
   requestedLine: 'center' | 'angle';
 }
 
@@ -154,7 +154,9 @@ interface RoundModules {
  *   'lost' a [data-action="reconnect"] button asks the room status and connects a new session; [data-action="leave"]
  *   goes home. The arena takes no input on this screen.
  * - walk: [data-list="fences"] > li (walkModel texts), [data-focus] the focused fence number, the scene mounted in
- *   [data-arena] with the course.
+ *   [data-arena] with the course. The fly-over paces itself over the window the server announces in the
+ *   'class-phase' walk message (startedAt / endsAt in server ms, translated with the clock) — one window per heat;
+ *   until it is known, and for a walk of another heat, the focus is fence 1 (audit K1 r1 #6: no client constant).
  * - round: the layout is layoutFor(rect.width, rect.height) of the MEASURED arena rectangle (deps.measure, by
  *   default getBoundingClientRect(); re-measured by resize() and on the window 'resize' event). The four controls
  *   are drawn as [data-control="turn-left"|"turn-right"|"gear"|"tap"], absolutely positioned INSIDE the arena with
@@ -293,9 +295,26 @@ export function createGame(deps: GameDeps): Game {
       roundClock: new RoundClockEstimate(),
       armed: null,
       caption: null,
-      walkStartedAt: null,
+      walk: null,
       requestedLine: 'center',
     };
+  }
+
+  /** The fence the fly-over focuses on at device time `now`: fence 1 until the server's window is known. */
+  function focusAt(now: number): number {
+    const walk = round?.walk ?? null;
+    if (!round || !walk) return 1;
+    return walkFocus(walk.endsAt - walk.startedAt, round.course.fences.length, now - walk.startedAt);
+  }
+
+  /** A 'class-phase' walk: the window comes from the server's clock, translated to device time (audit K1 r1 #6). */
+  function onWalkPhase(message: Extract<ServerMessage, { type: 'class-phase' }>): void {
+    if (!round) return;
+    const now = deps.clock.now();
+    const durationMs = Math.max(0, (message.endsAt ?? message.startedAt) - message.startedAt);
+    // Before the clock is measured (a late joiner's first second) the walk is taken to begin now, for its full length.
+    const startedAt = deps.clock.toClient(message.startedAt) ?? now;
+    round.walk = { heatIndex: message.heatIndex, startedAt, endsAt: startedAt + durationMs };
   }
 
   function roundKey(): string {
@@ -320,7 +339,8 @@ export function createGame(deps: GameDeps): Game {
         if (id !== me.id) round.interpolator.push(id, current.roundClockMs, rider.positionM);
       }
     }
-    if (current.phase === 'walk' && round.walkStartedAt === null) round.walkStartedAt = deps.clock.now();
+    // A walk of another heat never paces itself by the last heat's window: the state's heat decides which one is on.
+    if (round.walk !== null && current.phase === 'walk' && current.heatIndex !== round.walk.heatIndex) round.walk = null;
   }
 
   function onRoundEvent(event: RoundEventWire): void {
@@ -459,6 +479,11 @@ export function createGame(deps: GameDeps): Game {
         updateHud();
         break;
       case 'class-phase':
+        if (message.phase === 'walk') {
+          onWalkPhase(message);
+          updateHud();
+        }
+        break;
       case 'clock-ping':
       case 'emote':
         break;
@@ -714,7 +739,7 @@ export function createGame(deps: GameDeps): Game {
   function renderWalk(): string {
     if (!round) return '';
     const walk = walkModel(round.course, heightClass, locale);
-    const focus = walkFocus(WALK_MS, round.course.fences.length, round.walkStartedAt === null ? 0 : deps.clock.now() - round.walkStartedAt);
+    const focus = focusAt(deps.clock.now());
     return `<section class="screen walk">
       <div class="walk-panel">
         <h1>${escapeHtml(walk.title)}</h1>
@@ -813,7 +838,7 @@ export function createGame(deps: GameDeps): Game {
     const current = state();
     if (renderedScreen === 'walk') {
       const focus = root.querySelector('[data-focus]');
-      if (focus && round) focus.textContent = String(walkFocus(WALK_MS, round.course.fences.length, round.walkStartedAt === null ? 0 : deps.clock.now() - round.walkStartedAt));
+      if (focus && round) focus.textContent = String(focusAt(deps.clock.now()));
       return;
     }
     if (renderedScreen !== 'round' || !current || !me) return;
@@ -1019,7 +1044,7 @@ export function createGame(deps: GameDeps): Game {
     const currentScreen = screen();
     if (currentScreen === 'walk' && round) {
       updateHud();
-      deps.scene.render({ phase: 'walk', riders: [], camera: null, focusFence: walkFocus(WALK_MS, round.course.fences.length, round.walkStartedAt === null ? 0 : now - round.walkStartedAt) });
+      deps.scene.render({ phase: 'walk', riders: [], camera: null, focusFence: focusAt(now) });
       return;
     }
     if (currentScreen === 'round' && round && current && me) {

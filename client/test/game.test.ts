@@ -466,6 +466,29 @@ const table: ClassTableWire = {
 
 const roundEvent = (event: RoundEventWire): ServerMessage => ({ type: 'round-event', event });
 
+/** Three fences over 120 m with a turn, for the fly-over (the one-fence course keeps the focus on fence 1 throughout). */
+const course3: CourseSpec = {
+  id: 'c3',
+  version: 1,
+  lengthM: 120,
+  speedMPerMin: 300,
+  fences: [
+    { number: 1, distanceM: 30, type: 'vertical' },
+    { number: 2, distanceM: 60, type: 'oxer' },
+    { number: 3, distanceM: 100, type: 'vertical' },
+  ],
+  turns: [{ distanceM: 45, direction: 'left' }],
+};
+
+/** The server announces a phase with its clock: `startedAt` in server ms, the timer's end for walk and results. */
+const phaseMessage = (phase: 'walk' | 'riding' | 'results' | 'done', heatIndex: number, startedAt: number, endsAt: number | null): ServerMessage => ({
+  type: 'class-phase',
+  phase,
+  heatIndex,
+  startedAt,
+  endsAt,
+});
+
 /** Points (CSS px) inside the phone layout zones for 844×390: tap x 422..692 y 58..292; gear x 758..836 y 304..382; turn-left x 0..152 y 97..292. */
 const TAP: [number, number] = [500, 150];
 const GEAR: [number, number] = [800, 345];
@@ -1109,6 +1132,98 @@ describe('the course walk', () => {
     const h = await inWalk();
     click(h.root, '[data-action="locale"][data-locale="es"]');
     expect(text(q(h.root, '[data-list="fences"]').querySelector('li'))).toContain('Salto 1: vertical');
+  });
+});
+
+describe("the fly-over follows the server's walk window (audit K1 r1 #6)", () => {
+  /** The host in the lobby → class 1 announced with the three-fence course → the walk of heat 0 from server time `startedAt`, `walkMs` long. */
+  async function walkOf(h: Harness, heatIndex: number, startedAt: number, walkMs = 10_000): Promise<void> {
+    const session = h.session();
+    session.emitMessage(phaseMessage('walk', heatIndex, startedAt, startedAt + walkMs));
+    session.emitState(snapshot({ phase: 'walk', heatIndex }));
+    await settle();
+    expect(h.root.dataset.screen).toBe('walk');
+  }
+
+  const focusShown = (h: Harness): string => text(h.root.querySelector('[data-focus]'));
+  const focusDrawn = (h: Harness): number | null => {
+    h.game.frame(h.clock.now());
+    return h.scene.frames.at(-1)?.focusFence ?? null;
+  };
+
+  it('the focus moves from fence 1 to the last over the window the server announced, not over a client constant', async () => {
+    const h = await hostInLobby();
+    h.session().emitMessage({ type: 'class-course', course: course3, classNumber: 1 });
+    await walkOf(h, 0, h.clock.now(), 6_000); // a club walk of 6 s, whatever the client used to assume
+    expect(focusShown(h)).toBe('1');
+    h.clock.t += 2_500;
+    expect(focusDrawn(h)).toBe(2);
+    expect(focusShown(h)).toBe('2');
+    h.clock.t += 2_000;
+    expect(focusDrawn(h)).toBe(3);
+    h.clock.t += 10_000;
+    expect(focusDrawn(h)).toBe(3);
+  });
+
+  it('the window is read through the clock offset: server times become device times', async () => {
+    const h = await hostInLobby();
+    h.clock.toClient = (serverTime) => serverTime - 5_000; // the server's clock runs 5 s ahead of this device
+    h.session().emitMessage({ type: 'class-course', course: course3, classNumber: 1 });
+    await walkOf(h, 0, h.clock.now() + 5_000, 9_000); // began right now in server terms
+    expect(focusShown(h)).toBe('1');
+    h.clock.t += 3_500;
+    expect(focusDrawn(h)).toBe(2);
+    h.clock.t += 3_000;
+    expect(focusDrawn(h)).toBe(3);
+  });
+
+  it('the second heat of the class gets its own walk: the fly-over starts at fence 1 again instead of staying on the last fence', async () => {
+    const h = await hostInLobby();
+    h.session().emitMessage({ type: 'class-course', course: course3, classNumber: 1 });
+    await walkOf(h, 0, h.clock.now());
+    h.clock.t += 9_500;
+    expect(focusDrawn(h)).toBe(3);
+    // Heat 0 rides and ends; 15 s of results; then the walk of heat 1.
+    h.clock.t += 500;
+    h.session().emitMessage(phaseMessage('riding', 0, h.clock.now(), null));
+    h.session().emitState(snapshot({ phase: 'riding', heatIndex: 0, roundClockMs: 0, riders: { host: rider('host'), ana: rider('ana') } }));
+    h.clock.t += 40_000;
+    h.session().emitMessage(phaseMessage('results', 0, h.clock.now(), h.clock.now() + 15_000));
+    h.session().emitState(snapshot({ phase: 'results', heatIndex: 0 }));
+    h.clock.t += 15_000;
+    await walkOf(h, 1, h.clock.now());
+    expect(focusShown(h)).toBe('1');
+    expect(focusDrawn(h)).toBe(1);
+    h.clock.t += 3_400;
+    expect(focusDrawn(h)).toBe(2);
+    h.clock.t += 3_400;
+    expect(focusDrawn(h)).toBe(3);
+  });
+
+  it('a walk of a new heat seen in the state before its phase message never reuses the old window: fence 1 until the message comes', async () => {
+    const h = await hostInLobby();
+    h.session().emitMessage({ type: 'class-course', course: course3, classNumber: 1 });
+    await walkOf(h, 0, h.clock.now());
+    h.clock.t += 9_500;
+    expect(focusDrawn(h)).toBe(3);
+    h.clock.t += 60_000;
+    h.session().emitState(snapshot({ phase: 'walk', heatIndex: 1 }));
+    await settle();
+    expect(h.root.dataset.screen).toBe('walk');
+    expect(focusShown(h)).toBe('1');
+    expect(focusDrawn(h)).toBe(1);
+    h.session().emitMessage(phaseMessage('walk', 1, h.clock.now() - 3_400, h.clock.now() + 6_600));
+    expect(focusDrawn(h)).toBe(2);
+  });
+
+  it('a walk with no window known yet (the phase message not arrived) keeps the focus on fence 1', async () => {
+    const h = await hostInLobby();
+    h.session().emitMessage({ type: 'class-course', course: course3, classNumber: 1 });
+    h.session().emitState(snapshot({ phase: 'walk', heatIndex: 0 }));
+    await settle();
+    h.clock.t += 9_000;
+    expect(focusShown(h)).toBe('1');
+    expect(focusDrawn(h)).toBe(1);
   });
 });
 
