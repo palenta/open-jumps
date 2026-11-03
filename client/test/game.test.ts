@@ -2893,7 +2893,7 @@ describe('the own horse on the approach: one visible position, the camera with i
     expectOwn(h, 30.25, 'patch');
   });
 
-  it('a stale patch between the verdict and the fresh one is no fresh patch: the hold stays through it', async () => {
+  it('after the verdict, frames before any fresh patch keep the held position: the patch from before the verdict is stale', async () => {
     const h = await inRound();
     const t0 = h.clock.now() + 1_000;
     patch(h, 29.5);
