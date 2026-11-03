@@ -75,7 +75,10 @@ export interface LobbyRoomDeps {
  * - The tick that ends a heat publishes the heat's final snapshot (ClassFlow.finalSnapshot) into `riders` in the
  *   same patch that says 'results': every rider of the heat finished or eliminated, with the faults of the results
  *   (time faults included), never the values of the tick before (audit K1 r2 #2). `riders` keeps them through the
- *   results phase; the next heat's 'riding' replaces them.
+ *   results phase; the next heat's 'riding' replaces them. One tick may cross a whole heat (walk → riding → results,
+ *   possibly on to 'done' or into later heats): each phase event of the tick is applied with the data of its own heat,
+ *   and the 'results' of a heat creates the entries its 'riding' could not (the engine was already gone), so the heat
+ *   screen always shows exactly the riders of the heat that ended (audit K1 r3 #3).
  * - Every `riders` entry and every 'class-table' row carries riderName and ponyName (profiles learnt at onAuth, or
  *   read from the accounts before the class is built for a rider admitted over the directory who never connected): a
  *   rider who leaves the room for good is no participant any more, and the client names her from these.
@@ -613,29 +616,33 @@ export class LobbyRoom extends Room<{ state: LobbyState }> {
         for (const client of this.clients) if (this.accountBySession.has(client.sessionId)) this.startClockSync(client);
       }
       if (event.phase === 'riding') {
-        const engine = flow.engine();
-        this.heatRiders = new Set(engine ? engine.snapshot().riders.map((r) => r.riderId) : []);
+        // The data of a phase event is the data of ITS heat (audit K1 r3 #3): one tick may cross a whole heat — or
+        // several — so the engine is used only while it is still this heat's; a heat that already ended within the
+        // same tick is seated from its final snapshot.
+        const engine = flow.phase === 'riding' && flow.heatIndex === event.heatIndex ? flow.engine() : null;
+        const heat = engine?.snapshot() ?? flow.finalSnapshot(event.heatIndex);
         this.state.riders.clear();
-        for (const rider of engine?.snapshot().riders ?? []) {
-          const view = new RiderView();
-          view.accountId = rider.riderId;
-          view.heightClass = rider.heightClass;
-          const names = this.namesOf(rider.riderId);
-          view.riderName = names.riderName;
-          view.ponyName = names.ponyName;
-          this.state.riders.set(rider.riderId, view);
-        }
-        // A rider with no live connection at the start rides on autopilot until they come back.
-        for (const riderId of this.heatRiders) {
-          if (!this.isConnected(riderId) && !this.reconnections.has(riderId)) flow.riderDisconnected(riderId, this.serverNow());
+        this.heatRiders = new Set();
+        if (heat !== null) this.seatRiders(heat);
+        if (engine !== null) {
+          this.heatRiders = new Set(heat?.riders.map((r) => r.riderId) ?? []);
+          // A rider with no live connection at the start rides on autopilot until they come back.
+          for (const riderId of this.heatRiders) {
+            if (!this.isConnected(riderId) && !this.reconnections.has(riderId)) flow.riderDisconnected(riderId, this.serverNow());
+          }
         }
       }
       if (event.phase === 'results') {
         // The heat ended in this very tick — its last finish or elimination came after the previous syncRiders, and
         // flow.engine() is null from here — so its final values are published now, in the same patch as the phase:
-        // the heat screen never shows the last rider still riding or without her time faults (audit K1 r2 #2).
+        // the heat screen never shows the last rider still riding or without her time faults (audit K1 r2 #2). When
+        // the same tick also began the heat, its 'riding' event found no engine to read: the entries are created here
+        // from the final snapshot (audit K1 r3 #3), so `riders` is always exactly the heat that ended.
         const final = flow.finalSnapshot(event.heatIndex);
-        if (final !== null) this.publishRiders(final);
+        if (final !== null) {
+          this.seatRiders(final);
+          this.publishRiders(final);
+        }
         this.heatRiders = new Set();
         this.recordResults(flow.results().filter((r) => r.roundId === `${this.classId}#${event.heatIndex}`));
       }
@@ -652,6 +659,25 @@ export class LobbyRoom extends Room<{ state: LobbyState }> {
   private syncRiders(flow: ClassFlow): void {
     const engine = flow.engine();
     if (engine) this.publishRiders(engine.snapshot());
+  }
+
+  /**
+   * Make the state's riders exactly the riders of `snapshot`'s heat: an entry of another rider goes, a missing one is
+   * created with the rider's height class and names (its values come with publishRiders).
+   */
+  private seatRiders(snapshot: RoundSnapshot): void {
+    const ids = new Set(snapshot.riders.map((r) => r.riderId));
+    for (const id of [...this.state.riders.keys()]) if (!ids.has(id)) this.state.riders.delete(id);
+    for (const rider of snapshot.riders) {
+      if (this.state.riders.has(rider.riderId)) continue;
+      const view = new RiderView();
+      view.accountId = rider.riderId;
+      view.heightClass = rider.heightClass;
+      const names = this.namesOf(rider.riderId);
+      view.riderName = names.riderName;
+      view.ponyName = names.ponyName;
+      this.state.riders.set(rider.riderId, view);
+    }
   }
 
   /** Mirror a heat snapshot (the running one, or the final one of a heat that just ended) into the state's riders. */
