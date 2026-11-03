@@ -1179,6 +1179,29 @@ describe('pointer presses on the arena', () => {
     expect(h.session().sentOf('tap')).toEqual([{ type: 'tap', clientTime: h.clock.now(), fence: 1, attempt: 1 }]);
   });
 
+  it('in portrait (the rotate overlay up) a finger on any hidden zone sends nothing and spends nothing; back in landscape the controls work again (audit K1 r1 #7)', async () => {
+    const h = await inApproach();
+    h.arena.width = 390;
+    h.arena.height = 844;
+    h.game.resize();
+    expect(q(h.root, '[data-rotate]').hasAttribute('hidden')).toBe(false);
+    // The zones the portrait layout (390×844, phone) would compute: tap x 195..320 y 127..633, gear x 213..382
+    // y 667..836, left x 0..70 and right x 320..390 at y 211..633 — every one of them is covered by the overlay.
+    h.clock.t += 1_000;
+    for (const point of [[257, 380], [297, 751], [35, 400], [355, 400]] as [number, number][]) press(h, point);
+    expect(h.session().sent).toEqual([]);
+    h.arena.width = 844;
+    h.arena.height = 390;
+    h.game.resize();
+    expect(q(h.root, '[data-rotate]').hasAttribute('hidden')).toBe(true);
+    press(h, TAP);
+    press(h, GEAR);
+    expect(h.session().sent).toEqual([
+      { type: 'tap', clientTime: h.clock.now(), fence: 1, attempt: 1 },
+      { type: 'gear', gear: 'extended' },
+    ]);
+  });
+
   it('presses during the course walk send nothing', async () => {
     const h = await inWalk();
     press(h, TAP);

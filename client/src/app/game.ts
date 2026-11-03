@@ -158,7 +158,8 @@ interface RoundModules {
  *   left/top is tested with hitTest → InputController.press(control, clock.now()); a finger outside the rectangle
  *   is ignored. [data-hud-fence], [data-hud-faults], [data-hud-time], [data-hud-gear], [data-hud-caption],
  *   [data-badge] (placeholder art) from hudModel; [data-rotate] is shown (hidden attribute removed) when
- *   needsRotation(rect.width, rect.height). While the own horse's approach is open (from the 'approach' event
+ *   needsRotation(rect.width, rect.height), and while it is shown every pointerdown on the arena is ignored (the
+ *   hidden zones take no input). While the own horse's approach is open (from the 'approach' event
  *   until the 'takeoff' verdict) the tap control carries data-armed="true" and data-takeoff-at = clock.toClient(t0)
  *   (the device time of the take-off moment in the clock's own units — performance.now() ms in the browser), so
  *   the player sees the zone light up and a test can time its finger; both attributes go at the verdict. The
@@ -550,6 +551,9 @@ export function createGame(deps: GameDeps): Game {
 
   function onPointerDown(event: Event): void {
     if (screen() !== 'round' || !round || rect === null || layout === null) return;
+    // Portrait: the rotate overlay covers the arena and the controls are hidden — a finger on it is nothing, never a
+    // tap, a turn or a gear change through an invisible zone (audit K1 r1 #7).
+    if (needsRotation(rect.width, rect.height)) return;
     const target = event.target;
     if (!(target instanceof Element) || target.closest('[data-arena]') !== arena) return;
     const pointer = event as PointerEvent;
