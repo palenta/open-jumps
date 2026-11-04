@@ -154,7 +154,9 @@ const MS = 1000;
 /**
  * Timing model (all times in server ms):
  * - Running: position += speed(gear) × dt per tick. Entering the approach zone (position ≥ fence − 12 m) fixes
- *   t0 = now + (fence − position) / speed and opens the attempt judge; the speed stays frozen until the decision.
+ *   t0 = now + (fence − position) / speed and opens the attempt judge; the speed stays frozen until the decision,
+ *   and the horse is at fence − speed × (t0 − now) from the zone entry to t0 (also for the rest of the tick that
+ *   entered the zone).
  * - Judging: taps go to the judge in receive order (plan 2.3); the first accepted tap decides at once, "no tap"
  *   is fixed at t0 + 700. The approach state used is the state AT THE ACTION TIME (gear/line change log), with
  *   recentHardTurn from the last turn and the lead-horse bonus from the engine; "no tap" uses the state at t0.
@@ -505,6 +507,9 @@ export class CourseRunner {
       this.pos += (speed * (to - time)) / MS;
       time = to;
     }
+    // An approach that opened inside this stretch is ridden on at its frozen speed for the rest of it, as every later
+    // moment of the approach is: the position at `to` is fence − speed × (t0 − to), never the zone entry held back.
+    if (this.phase === 'approach' && time < to) this.move(time, to, events);
   }
 
   /** The next course boundary ahead while running: a turn zone, an approach zone (unless a turn is open) or the finish line. */
