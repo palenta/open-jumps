@@ -2990,6 +2990,41 @@ describe('the debug overlay (K1.1 step 9)', () => {
   };
   const takeoffOwn = (h: Harness, offsetMs: number | null, riderId = 'host', attempt = 1): void =>
     h.session().emitMessage(roundEvent({ type: 'takeoff', riderId, fence: 1, attempt, decidedAt: h.clock.now(), offsetMs, outcome: clean, approach: approach70 }));
+  /** The own horse's 'takeoff' verdict for any fence and attempt (tests audit r1 #3). */
+  const verdictOwn = (h: Harness, fence: number, attempt: number, offsetMs: number | null, outcome: TakeoffOutcome = clean): void =>
+    h.session().emitMessage(roundEvent({ type: 'takeoff', riderId: 'host', fence, attempt, decidedAt: h.clock.now(), offsetMs, outcome, approach: approach70 }));
+  const refusal: TakeoffOutcome = { kind: 'refusal', faults: 0, cleared: false, label: 'rehuse', horseJumped: false };
+  /** The row of the press whose moment was `clientTime` (every tap below has its own moment). */
+  const rowOf = (h: Harness, clientTime: number): HTMLElement => {
+    const row = rows(h).find((candidate) => candidate.dataset.clientTime === String(clientTime));
+    if (row === undefined) throw new Error(`no press row with data-client-time ${String(clientTime)}`);
+    return row;
+  };
+  /** The judge's part of a row: [data-judge, data-judge-offset]. */
+  const judgeOf = (h: Harness, clientTime: number): [string | undefined, string | undefined] => {
+    const row = rowOf(h, clientTime);
+    return [row.dataset.judge, row.dataset.judgeOffset];
+  };
+  /** The host riding heat 1 of class 1 on the three-fence course, the overlay on. */
+  async function debugRound3(): Promise<Harness> {
+    const h = await hostInLobby({}, snapshot(), undefined, true);
+    h.session().emitMessage({ type: 'class-course', course: course3, classNumber: 1 });
+    h.session().emitState(snapshot({ phase: 'walk', heatIndex: 0 }));
+    h.session().emitState(ridingState());
+    await settle();
+    expect(h.root.dataset.screen).toBe('round');
+    return h;
+  }
+  /** The approach of `fence`, `attempt` opens one second ahead and her finger lands 30 ms after its t0 (handled 10 ms later); returns the moment of the tap. */
+  function tapAt30(h: Harness, fence: number, attempt: number, viaSync = false): number {
+    const t0 = h.clock.now() + 1_000;
+    if (viaSync) h.session().emitMessage({ type: 'approach-sync', classNumber: 1, heatIndex: h.session().state?.heatIndex ?? 0, hardTurn: false, approach: { fence, attempt, t0, speedMps: 5 } });
+    else approachOwn(h, fence, attempt, t0, 5);
+    h.clock.t = t0 + 40;
+    press(h, TAP, t0 + 30);
+    expect(rowOf(h, t0 + 30).dataset).toMatchObject({ zone: 'tap', outcome: 'sent', localOffset: '30', judge: 'pending' });
+    return t0 + 30;
+  }
 
   it('without the flag there is no [data-debug] anywhere — sign-in, lobby, round', async () => {
     const h = await inRound();
@@ -3113,6 +3148,69 @@ describe('the debug overlay (K1.1 step 9)', () => {
     takeoffOwn(h, 0);
     const tapRow = rows(h).find((row) => row.dataset.zone === 'tap');
     expect(tapRow?.dataset.judge).toBe('pending');
+  });
+
+  it('three taps at the same local offset — fence 1 attempt 1, fence 1 attempt 2, fence 2 attempt 1 — each own take-off confirms its own row only (tests audit r1 #3)', async () => {
+    const h = await debugRound3();
+    const a = tapAt30(h, 1, 1);
+    // The verdict of attempt 1 (a refusal) never reaches her: the connection drops and comes back with attempt 2 open.
+    h.session().emitStatus('dropped');
+    h.clock.t += 3_000;
+    h.session().emitStatus('connected');
+    const b = tapAt30(h, 1, 2, true);
+    expect(judgeOf(h, a)).toEqual(['pending', '']);
+    verdictOwn(h, 1, 2, 40);
+    expect(judgeOf(h, b)).toEqual(['accepted', '40']);
+    expect(judgeOf(h, a)).toEqual(['pending', '']); // the same fence, the same local offset — another attempt
+    h.session().emitState(ridingState({ riders: { host: rider('host', { positionM: 31, nextFence: 2 }), ana: rider('ana') } }));
+    h.clock.t += 4_000;
+    const c = tapAt30(h, 2, 1);
+    expect(judgeOf(h, a)).toEqual(['pending', '']);
+    expect(judgeOf(h, b)).toEqual(['accepted', '40']);
+    verdictOwn(h, 2, 1, 75); // 45 ms from the local estimate
+    expect(judgeOf(h, c)).toEqual(['unconfirmed', '75']);
+    expect(judgeOf(h, b)).toEqual(['accepted', '40']); // the same attempt number, another fence
+    expect(judgeOf(h, a)).toEqual(['pending', '']); // the same attempt number, another fence
+  });
+
+  it('negative: an own take-off of another fence or another attempt confirms nothing — only the one of the same fence AND attempt does (tests audit r1 #3)', async () => {
+    const h = await debugRound3();
+    // Attempt 1 at fence 1: no finger, a refusal. Attempt 2: her tap.
+    approachOwn(h, 1, 1, h.clock.now() + 1_000, 5);
+    h.clock.t += 1_400;
+    verdictOwn(h, 1, 1, null, refusal);
+    h.clock.t += 3_000;
+    const b = tapAt30(h, 1, 2);
+    verdictOwn(h, 1, 1, 30, refusal); // the same fence, another attempt — the very offset of her tap
+    expect(judgeOf(h, b)).toEqual(['pending', '']);
+    verdictOwn(h, 2, 2, 30); // the same attempt, another fence
+    expect(judgeOf(h, b)).toEqual(['pending', '']);
+    verdictOwn(h, 2, 1, 30); // neither
+    expect(judgeOf(h, b)).toEqual(['pending', '']);
+    verdictOwn(h, 1, 2, 30); // her own approach: fence 1, attempt 2
+    expect(judgeOf(h, b)).toEqual(['accepted', '30']);
+  });
+
+  it('a new heat of the same class clears the matching: the new heat\'s take-off of the same fence and attempt never confirms a tap of the old heat, and the new heat\'s own tap is matched afresh (tests audit r1 #3)', async () => {
+    const h = await debugRound();
+    const old = tapAt30(h, 1, 1);
+    // Heat 1 ends before its verdict reaches her; heat 2 of the same class rides. (The harness has her ride heat 2
+    // too: the matching must not lean on who rides which heat.)
+    h.session().emitState(snapshot({ phase: 'results', heatIndex: 0 }));
+    h.session().emitState(snapshot({ phase: 'walk', heatIndex: 1 }));
+    h.session().emitState(ridingState({ heatIndex: 1 }));
+    await settle();
+    expect(h.root.dataset.screen).toBe('round');
+    h.clock.t += 2_000;
+    verdictOwn(h, 1, 1, 40); // heat 2's verdict at fence 1, attempt 1, 10 ms from the old tap's local estimate
+    expect(judgeOf(h, old)).toEqual(['pending', '']);
+    expect(rowOf(h, old).dataset.localOffset).toBe('30'); // the old row stays, as it was
+    h.clock.t += 2_000;
+    const fresh = tapAt30(h, 1, 1); // heat 2's own tap: the verdict that came before it is not its verdict
+    expect(judgeOf(h, fresh)).toEqual(['pending', '']);
+    verdictOwn(h, 1, 1, 40);
+    expect(judgeOf(h, fresh)).toEqual(['accepted', '40']);
+    expect(judgeOf(h, old)).toEqual(['pending', '']);
   });
 
   it('a turn that went out shows the quality of the own turn verdict', async () => {
