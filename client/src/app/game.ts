@@ -6,6 +6,7 @@ import {
   allowedHeightClasses,
   caption as captionOf,
   DEFAULT_LOCALE,
+  freezeForRound,
   isLocale,
   translate,
   translateKey,
@@ -231,7 +232,11 @@ interface RoundModules {
   hold: { positionM: number; cleared: boolean } | null;
   /** The direction button of the own turn that went out, until the own 'turn' verdict (data-chosen). */
   chosen: Control | null;
-  /** The schoolmaster assist frozen for this class (the debug overlay's matching: an automatic take-off is not her tap). */
+  /**
+   * The schoolmaster assist frozen for this class — the server's word ('class-rules') once it arrives, until then the
+   * lobby's last one that went out — for the debug overlay's matching only (an automatic take-off is not her tap); the
+   * window never reads it.
+   */
   schoolmaster: boolean;
   /** The own 'autopilot' event's last word (the debug overlay's matching, together with the state's autopilot). */
   autopilot: boolean;
@@ -269,8 +274,10 @@ interface RoundModules {
  *   LobbyView is fetched on entry, after every door action and whenever the state's pendingCount changes — a
  *   visitor ringing while the host is already in the lobby appears without a reload); input[data-action="entry-open"] and
  *   input[data-action="auto-admit"] (checkboxes); select[data-height] sends {type:'height'}; input[data-assist=
- *   "schoolmaster"|"widerWindow"] send {type:'assists'}; [data-action="start-class"] (host only) sends start-class
- *   with select[data-order]; [data-action="leave"] leaves to home.
+ *   "schoolmaster"|"widerWindow"] send {type:'assists'} — a choice the session could not send (dropped, connecting)
+ *   is undone at once, so the select and the checkboxes show what the server was told (K1.1 code audit r2); the class
+ *   is judged with the rules the server froze ('class-rules'), never with these; [data-action="start-class"] (host
+ *   only) sends start-class with select[data-order]; [data-action="leave"] leaves to home.
  * - ended: shown the moment the session is over for good (kicked, revoked, lost), whatever phase the last state
  *   named — never a frozen walk or round (audit K1 r1 #5): translate('lobby.ended.<kind>') in [data-ended]; for
  *   'lost' a [data-action="reconnect"] button asks the room status and connects a new session; [data-action="leave"]
@@ -360,12 +367,18 @@ interface RoundModules {
  *     fence.distanceM)); its half-lengths markerHalfLengths(window, speedMps) with window =
  *     round.hint.approachWindow.windowAt(now) — the very window the instant hint judges with (step 6) — and the
  *     speedMps of the 'approach' / 'approach-sync' (frozen: a later gear change changes cleanMs, never the speed);
- *     its state markerState(clock.toServer(now), t0, window, speedMps). The gear of that window (K1.1 code audit r1,
- *     finding 1): the state patches' gear, and every pace press that went out from its moment on — until a patch
- *     confirms it, the narrower window of the gear before it and the gear asked for, so the band and the hint never
- *     promise more than the judge, who takes the change at its receipt, may use; a stale patch neither undoes nor
- *     flickers it; the schoolmaster, the own autopilot and a wide turn (until the fence is cleared) keep the canter
- *     collected whatever was pressed (ApproachWindow). It goes at the own 'takeoff' verdict (no
+ *     its state markerState(clock.toServer(now), t0, window, speedMps). The gear and the line of that window are the
+ *     server's (K1.1 code audit r2, ApproachWindow): every Pace and line shift that went out is numbered (seq,
+ *     monotonic for the page) and is a state the judge may use from its send moment on, until the server's
+ *     'control-applied' answer places it exactly at its receive time with her controls from then on — or its 'refused'
+ *     (by seq) drops it; until then the window is the narrowest over every state the server may be in (it applies her
+ *     commands in order), so the band and the hint never promise more than the judge may use. The state patches' gear
+ *     settles nothing and no timeout does. A connection that drops leaves its unanswered commands to the next
+ *     'approach-sync', whose controls (her requested gear and line as of the sync) replace them. The schoolmaster
+ *     the server froze for the class ('class-rules' — never the lobby's checkbox), the own autopilot (the server's
+ *     state and events; off from an 'approach-sync') and a wide turn (until the fence is cleared) keep the canter
+ *     collected whatever was pressed (the shared gearInForce); once that ends, the requested gear the server told
+ *     applies at once. Until 'class-rules' arrives no assist is assumed. It goes at the own 'takeoff' verdict (no
  *     bright marker after it), with an 'approach-sync' without an approach, at a new class, heat or session; another
  *     rider's approach changes nothing. The arena frees the marker's resources with the course.
  *   · The own horse's visible position — one value, the camera follows it — is chosen by OwnHorseMode: 'forecast'
@@ -445,6 +458,8 @@ export function createGame(deps: GameDeps): Game {
   let viewPendingCount = -1;
   let heightClass: HeightClass = 70;
   let assists = { schoolmaster: false, widerWindow: false };
+  /** The seq of the last gear or line command this page numbered (K1.1 code audit r2). */
+  let controlSeq = 0;
   let order: 'random' | 'lowest-class-first' = 'random';
   let round: RoundModules | null = null;
   let table: ClassTableWire | null = null;
@@ -522,15 +537,19 @@ export function createGame(deps: GameDeps): Game {
 
   /**
    * Hands a message to the session; true when it went out (a line or a gear the server never heard changes nothing
-   * here). A gear that went out reaches the shared window at once, dated now (K1.1 code audit r1, finding 1).
+   * here). A gear or line command is numbered (K1.1 code audit r2: seq, monotonic for this page) and, once it went out,
+   * reaches the shared window at once as a command the server may apply from now on, until its answer.
    */
   function send(message: ClientRoomMessage): boolean {
-    const went = session?.send(message) ?? false;
-    if (went && message.type === 'line' && round) {
-      round.requestedLine = message.line;
-      round.hint.setLine(message.line);
+    if (session === null) return false;
+    if (message.type !== 'gear' && message.type !== 'line') return session.send(message);
+    controlSeq += 1;
+    const seq = controlSeq;
+    const went = session.send(message, seq);
+    if (went && round) {
+      round.hint.approachWindow.sent(seq, message.type === 'gear' ? { gear: message.gear } : { line: message.line }, deps.clock.now());
+      if (message.type === 'line') round.requestedLine = message.line;
     }
-    if (went && message.type === 'gear' && round) round.hint.requestGear(message.gear, deps.clock.now());
     return went;
   }
 
@@ -541,7 +560,9 @@ export function createGame(deps: GameDeps): Game {
   // ---- the round modules ------------------------------------------------------------------------------------
 
   function newRound(course: CourseSpec, classNumber: number): RoundModules {
-    const hint = new InstantHint(deps.clock as ClientClock, { heightClass, rules: { mode: 'ranked', assists: { ...assists } } });
+    // The rules are the server's (K1.1 code audit r2): until its 'class-rules' says what it froze for her, no assist is
+    // assumed — the narrowest window — and the height is the one her lobby last sent.
+    const hint = new InstantHint(deps.clock as ClientClock, { heightClass, rules: { mode: 'ranked', assists: freezeForRound({ schoolmaster: false, widerWindow: false }) } });
     const controller = new InputController({ send });
     return {
       classNumber,
@@ -616,10 +637,9 @@ export function createGame(deps: GameDeps): Game {
       nextFence: own?.nextFence ?? 1,
       attempt: own?.attempt ?? 1,
     });
-    if (own) {
-      round.hint.setAutopilot(own.autopilot);
-      round.hint.setGear(own.gear);
-    }
+    // The patch's gear is the gear in force at the server's last tick: what the window reads comes from the server's
+    // answers to her commands (K1.1 code audit r2), never from it. The autopilot is the server's word on her horse.
+    if (own) round.hint.setAutopilot(own.autopilot);
     if (current.phase === 'riding') {
       round.roundClock.onPatch(current.roundClockMs, deps.clock.now());
       for (const [id, rider] of Object.entries(current.riders)) {
@@ -702,10 +722,21 @@ export function createGame(deps: GameDeps): Game {
     if (current !== null && current.heatIndex !== message.heatIndex) return;
     const approach = message.approach;
     round.controller.sync(`${String(message.classNumber)}#${String(message.heatIndex)}`, approach);
-    round.hint.sync({ hardTurn: message.hardTurn, approach });
+    round.hint.sync({ hardTurn: message.hardTurn, approach, controls: message.controls ?? null });
     round.armed = approach === null ? null : { fence: approach.fence, attempt: approach.attempt, t0: approach.t0, speedMps: approach.speedMps };
     // Taking control back: the approach open now is forecast afresh, and no hold survives a sync without one.
     round.hold = null;
+  }
+
+  /**
+   * The rules the server froze for her class ('class-rules', K1.1 code audit r2): the window judges with them from now
+   * on — her height class, the mode, her assists — and the debug overlay reads the schoolmaster from them. Rules of
+   * another class change nothing.
+   */
+  function onClassRules(message: Extract<ServerMessage, { type: 'class-rules' }>): void {
+    if (!round || message.classNumber !== round.classNumber) return;
+    round.hint.configure({ heightClass: message.heightClass, rules: { mode: message.mode, assists: freezeForRound(message.assists) } });
+    round.schoolmaster = message.assists.schoolmaster;
   }
 
   // ---- the own horse and its take-off marker (K1.1 step 7) ---------------------------------------------------
@@ -787,6 +818,8 @@ export function createGame(deps: GameDeps): Game {
       }),
       next.onStatus(() => {
         if (session !== next) return;
+        // The connection her pending commands went out on is gone: each was applied or lost with it (K1.1 code audit r2).
+        if (next.status !== 'connected') round?.hint.approachWindow.connectionLost();
         if (next.status === 'ended') sessionEnd = next.end;
         render();
       }),
@@ -839,8 +872,17 @@ export function createGame(deps: GameDeps): Game {
         render();
         break;
       case 'refused':
+        // A refused gear or line command was never applied (K1.1 code audit r2): the window forgets it.
+        if (round && message.seq !== undefined) round.hint.approachWindow.refused(message.seq);
         if (round) round.caption = { event: { type: 'refused', error: message.error }, riderId: me?.id ?? '' };
         updateHud();
+        break;
+      case 'control-applied':
+        // The server's word on one of her commands: its moment and her controls from then on (K1.1 code audit r2).
+        round?.hint.approachWindow.applied(message);
+        break;
+      case 'class-rules':
+        onClassRules(message);
         break;
       case 'approach-sync':
         onApproachSync(message);
@@ -1569,8 +1611,9 @@ export function createGame(deps: GameDeps): Game {
     if (!(target instanceof HTMLInputElement || target instanceof HTMLSelectElement)) return;
     if (target instanceof HTMLSelectElement && target.hasAttribute('data-height')) {
       const value = Number(target.value) as HeightClass;
-      heightClass = value;
-      send({ type: 'height', heightClass: value });
+      // Only what went out is the rider's setting (K1.1 code audit r2): a choice the session could not send is undone.
+      if (send({ type: 'height', heightClass: value })) heightClass = value;
+      else target.value = String(heightClass);
       return;
     }
     if (target instanceof HTMLSelectElement && target.hasAttribute('data-order')) {
@@ -1578,8 +1621,10 @@ export function createGame(deps: GameDeps): Game {
       return;
     }
     if (target instanceof HTMLInputElement && target.dataset.assist !== undefined) {
-      assists = { ...assists, [target.dataset.assist]: target.checked };
-      send({ type: 'assists', schoolmaster: assists.schoolmaster, widerWindow: assists.widerWindow });
+      // The checkbox shows what the server was told (K1.1 code audit r2): a tick the session could not send is undone.
+      const next = { ...assists, [target.dataset.assist]: target.checked };
+      if (send({ type: 'assists', schoolmaster: next.schoolmaster, widerWindow: next.widerWindow })) assists = next;
+      else target.checked = !target.checked;
       return;
     }
     if (target instanceof HTMLInputElement && target.dataset.action === 'entry-open') {

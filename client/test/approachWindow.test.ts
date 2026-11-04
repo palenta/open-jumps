@@ -185,3 +185,161 @@ describe("ApproachWindow — the rider's own pace presses (K1.1 code audit r1, f
     expect(window.stateAt(200).gear).toBe('gallop');
   });
 });
+
+describe('ApproachWindow — the server\'s controls log and the commands it has not answered yet (K1.1 code audit r2)', () => {
+  /** 70 cm, collected or extended, straight: ±157.5 ms clean; gallop ±78.75; the sharp line ±126. */
+  const GALLOP_70 = CLEAN_70 * WINDOW_MODIFIERS.gallop;
+  const ANGLE_70 = CLEAN_70 * WINDOW_MODIFIERS.sharpAngle;
+  const answer = (seq: number | null, at: number, requestedGear: 'collected' | 'extended' | 'gallop', line: 'center' | 'angle' = 'center') => ({ seq, at, requestedGear, line });
+
+  it("Codex's Pace cycle: extended, gallop, collected, extended in flight — gallop's window until the server's answer rules the gallop out, exactly from that answer's moment", () => {
+    const window = new ApproachWindow(context70);
+    window.sent(1, { gear: 'extended' }, 1_000);
+    window.sent(2, { gear: 'gallop' }, 1_100);
+    window.sent(3, { gear: 'collected' }, 1_200);
+    window.sent(4, { gear: 'extended' }, 1_300);
+    expect(window.windowAt(1_050).cleanMs).toBeCloseTo(CLEAN_70, 9); // only extended may be in force yet
+    expect(window.windowAt(1_425).cleanMs).toBeCloseTo(GALLOP_70, 9); // the first extended patch would arrive now: nothing settled
+    window.applied(answer(1, 1_150, 'extended'));
+    window.applied(answer(2, 1_260, 'gallop'));
+    expect(window.windowAt(1_425).cleanMs).toBeCloseTo(GALLOP_70, 9);
+    window.applied(answer(3, 1_380, 'collected'));
+    expect(window.stateAt(1_379).gear).toBe('gallop'); // the server's log: gallop until 1 380
+    expect(window.windowAt(1_380).cleanMs).toBeCloseTo(CLEAN_70, 9); // collected or the extended still in flight
+    window.applied(answer(4, 1_470, 'extended'));
+    expect(window.stateAt(1_470).gear).toBe('extended');
+    expect(window.stateAt(1_200).gear).toBe('extended'); // the log keeps every moment: extended from 1 150 to 1 260
+  });
+
+  it('a command is never in force before the log\'s newest moment: the server applies commands in order', () => {
+    const window = new ApproachWindow(context70);
+    window.sent(1, { gear: 'extended' }, 1_000);
+    window.sent(2, { gear: 'gallop' }, 1_010);
+    window.applied(answer(1, 1_200, 'extended'));
+    expect(window.windowAt(1_100).cleanMs).toBeCloseTo(CLEAN_70, 9); // before 1 200 the server held collected, and gallop came after it
+    expect(window.windowAt(1_200).cleanMs).toBeCloseTo(GALLOP_70, 9);
+  });
+
+  it('no timeout is proof of anything: an unanswered command is a possible state ten seconds on', () => {
+    const window = new ApproachWindow(context70);
+    window.sent(1, { gear: 'gallop' }, 1_000);
+    window.sent(2, { gear: 'collected' }, 1_100);
+    expect(window.windowAt(11_000).cleanMs).toBeCloseTo(GALLOP_70, 9);
+  });
+
+  it('a refused command was never applied: it is dropped, and the commands after it are read without it', () => {
+    const window = new ApproachWindow(context70);
+    window.sent(1, { gear: 'gallop' }, 1_000);
+    window.sent(2, { line: 'angle' }, 1_100);
+    expect(window.stateAt(1_200)).toMatchObject({ gear: 'gallop', angleSharp: true }); // both applied: the narrowest of all
+    expect(window.stateAt(1_050)).toMatchObject({ gear: 'gallop', angleSharp: false }); // the line had not gone out yet
+    window.refused(1);
+    expect(window.stateAt(1_200)).toMatchObject({ gear: 'collected', angleSharp: true });
+    expect(window.windowAt(1_200).cleanMs).toBeCloseTo(ANGLE_70, 9);
+    window.refused(2);
+    expect(window.windowAt(1_200).cleanMs).toBeCloseTo(CLEAN_70, 9);
+  });
+
+  it('the line shares the mechanism: angle → center keeps the sharp line until the answer, and exactly from the answer\'s moment the centre (finding 3)', () => {
+    const window = new ApproachWindow(context70);
+    window.sent(1, { line: 'angle' }, 1_000);
+    expect(window.stateAt(999).angleSharp).toBe(false); // before it went out
+    expect(window.stateAt(1_000).angleSharp).toBe(true); // from the send on the judge may have it
+    window.applied(answer(1, 1_050, 'collected', 'angle'));
+    window.sent(2, { line: 'center' }, 2_000);
+    expect(window.windowAt(2_140).cleanMs).toBeCloseTo(ANGLE_70, 9); // a tap 140 ms in: a run-out for the judge, never clean
+    window.applied(answer(2, 2_150, 'collected', 'center'));
+    expect(window.stateAt(2_140).angleSharp).toBe(true); // the server had the angle until 2 150
+    expect(window.stateAt(2_150).angleSharp).toBe(false);
+  });
+
+  it('an answer for a later command settles an earlier one never answered: possible until that answer\'s moment, ruled out from it', () => {
+    const window = new ApproachWindow(context70);
+    window.sent(1, { gear: 'gallop' }, 1_000);
+    window.sent(2, { gear: 'collected' }, 1_100);
+    window.applied(answer(2, 1_300, 'collected'));
+    expect(window.windowAt(1_250).cleanMs).toBeCloseTo(GALLOP_70, 9);
+    expect(window.windowAt(1_300).cleanMs).toBeCloseTo(CLEAN_70, 9);
+  });
+
+  it('a lost connection and the sync: its commands possible until the sync\'s moment, the sync\'s controls from it, the new connection\'s commands on top', () => {
+    const window = new ApproachWindow(context70);
+    window.sent(1, { gear: 'gallop' }, 1_000);
+    window.connectionLost();
+    window.sent(2, { line: 'angle' }, 2_500); // went out on the new connection, before its sync arrived
+    window.synced({ at: 2_400, requestedGear: 'collected', line: 'center' }); // the gallop never reached the server
+    expect(window.windowAt(2_300).cleanMs).toBeCloseTo(GALLOP_70, 9); // before the sync's moment it may have
+    expect(window.stateAt(2_450)).toMatchObject({ gear: 'collected', angleSharp: false });
+    expect(window.stateAt(2_600)).toMatchObject({ gear: 'collected', angleSharp: true }); // the new command stays pending
+    window.applied(answer(2, 2_620, 'collected', 'angle'));
+    expect(window.stateAt(2_610).angleSharp).toBe(false);
+    expect(window.stateAt(2_620).angleSharp).toBe(true);
+  });
+
+  it('a sync whose controls say the old command arrived: from its moment the server\'s gallop', () => {
+    const window = new ApproachWindow(context70);
+    window.sent(1, { gear: 'gallop' }, 1_000);
+    window.connectionLost();
+    window.synced({ at: 2_400, requestedGear: 'gallop', line: 'center' });
+    expect(window.windowAt(2_400).cleanMs).toBeCloseTo(GALLOP_70, 9);
+    expect(window.windowAt(9_000).cleanMs).toBeCloseTo(GALLOP_70, 9);
+  });
+
+  it('negative: a sync without controls rules nothing out — the old commands stay possible', () => {
+    const window = new ApproachWindow(context70);
+    window.sent(1, { gear: 'gallop' }, 1_000);
+    window.connectionLost();
+    window.synced(null);
+    expect(window.windowAt(5_000).cleanMs).toBeCloseTo(GALLOP_70, 9);
+  });
+
+  it('forced collected is the shared rule: once the autopilot is off or the wide turn spent, the requested gear the server told applies at once (finding 2)', () => {
+    const window = new ApproachWindow(context70);
+    window.sent(1, { gear: 'gallop' }, 1_000);
+    window.applied(answer(1, 1_050, 'gallop'));
+    window.setAutopilot(true);
+    expect(window.stateAt(2_000).gear).toBe('collected');
+    window.setAutopilot(false);
+    expect(window.stateAt(2_000).gear).toBe('gallop');
+    window.wideTurn();
+    expect(window.stateAt(2_000).gear).toBe('collected');
+    window.clearedFence();
+    expect(window.stateAt(2_000).gear).toBe('gallop');
+    window.setAutopilot(true);
+    window.synced(null); // control handed back: the autopilot is off
+    expect(window.stateAt(2_000).gear).toBe('gallop');
+  });
+
+  it('the schoolmaster is the frozen rules\' alone: configured on, collected whatever the server holds; configured off, the server\'s gallop', () => {
+    const window = new ApproachWindow(context70);
+    window.applied(answer(null, 1_000, 'gallop'));
+    window.configure({ heightClass: 70, rules: { mode: 'ranked', assists: freezeForRound({ schoolmaster: true, widerWindow: false }) } });
+    expect(window.stateAt(2_000).gear).toBe('collected');
+    window.configure(context70);
+    expect(window.stateAt(2_000).gear).toBe('gallop');
+  });
+
+  it('the moments are read on the server\'s clock at the time asked: a device moment is translated by the clock, and without a translation every state of the log counts', () => {
+    let offset: number | null = 500; // server − device
+    const window = new ApproachWindow(context70, { toServer: (clientTime) => (offset === null ? null : clientTime + offset) });
+    window.applied(answer(null, 1_500, 'gallop')); // server ms
+    window.applied(answer(null, 2_500, 'collected'));
+    expect(window.stateAt(999).gear).toBe('collected');
+    expect(window.stateAt(1_000).gear).toBe('gallop'); // device 1 000 = server 1 500
+    expect(window.stateAt(2_000).gear).toBe('collected');
+    offset = 400; // a refined offset moves the reading with it
+    expect(window.stateAt(1_099).gear).toBe('collected');
+    expect(window.stateAt(1_100).gear).toBe('gallop');
+    offset = null;
+    expect(window.stateAt(9_000).gear).toBe('gallop'); // which entry? any of them: the narrowest
+  });
+
+  it('negative: the patches play no part — there is no way in for a state patch\'s gear, and setGear is an exact entry of the log, nothing more', () => {
+    const window = new ApproachWindow(context70);
+    window.sent(1, { gear: 'gallop' }, 1_000);
+    window.setGear('collected', 1_200); // an exact entry: the server held collected from 1 200 — the gallop is still in flight
+    expect(window.windowAt(1_300).cleanMs).toBeCloseTo(GALLOP_70, 9);
+    expect('settle' in window).toBe(false);
+    expect('requestGear' in window).toBe(false);
+  });
+});

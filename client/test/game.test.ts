@@ -130,6 +130,8 @@ class FakeSession implements SessionLike {
   readonly connects: [string, string][] = [];
   /** Every message sent through the session, in order. */
   readonly sent: ClientRoomMessage[] = [];
+  /** The seq each message of `sent` went out with (K1.1 code audit r2: the game numbers its gear and line commands). */
+  readonly seqs: (number | undefined)[] = [];
   resumes = 0;
   leaves = 0;
   /** What resume() answers (true: connected afterwards). */
@@ -201,11 +203,21 @@ class FakeSession implements SessionLike {
     return Promise.resolve();
   }
 
-  /** As the real session: handed out (recorded) only while connected; false otherwise, nothing recorded. */
-  send(message: ClientRoomMessage): boolean {
+  /** As the real session: handed out (recorded, with its seq) only while connected; false otherwise, nothing recorded. */
+  send(message: ClientRoomMessage, seq?: number): boolean {
     if (this.status !== 'connected') return false;
     this.sent.push(message);
+    this.seqs.push(seq);
     return true;
+  }
+
+  /** The seq of the last message of this type that went out (K1.1 code audit r2). */
+  seqOfLast(type: 'gear' | 'line'): number {
+    for (let i = this.sent.length - 1; i >= 0; i -= 1) {
+      const seq = this.seqs[i];
+      if (this.sent[i]?.type === type && seq !== undefined) return seq;
+    }
+    throw new Error(`no numbered ${type} went out`);
   }
 
   course(): CourseSpec | null {
@@ -3680,5 +3692,308 @@ describe("the page's clock on another scale than the server's (K1.1 steps 7 and 
     expectOwnAt(h, at, 30, 'forecast');
     expect(markerAt(h, at + CLEAN + 1)?.state).toBe('late');
     expect(tapControl(h).getAttribute('data-takeoff-at')).toBe(String(at));
+  });
+});
+
+describe('the server tells the window which controls and rules it judges with (K1.1 code audit r2)', () => {
+  /**
+   * 70 cm, straight, no hard turn: collected and extended ±157.5 ms clean, gallop ±78.75 ms, the sharp line ±126 ms.
+   * The test clock reads the server's time (offset 0), so a server moment and a device moment are the same number.
+   */
+  const CLEAN = 157.5;
+  const GALLOP_CLEAN = 78.75;
+  const ANGLE_CLEAN = 126;
+  /** The band's clean half-length at 5 m/s for a clean half-width in ms. */
+  const band = (cleanMs: number): number => (cleanMs / 1000) * 5;
+  const half = (h: Harness, now = h.clock.now()): number | null => {
+    h.game.frame(now);
+    return h.scene.frames.at(-1)?.takeoff?.cleanHalfM ?? null;
+  };
+  const caption = (h: Harness): string => text(h.root.querySelector('[data-hud-caption]'));
+  /** The caption of the instant hint for the own horse at fence `fence`. */
+  const hinted = (label: string, fence = 1): string => captionOf('en', { type: 'takeoff', label, fence }, { rider: 'Maria', pony: 'Dakota', ponyGender: 'yegua' });
+  /** A state patch of heat 1 showing the own horse in `gear` (Ana in collected canter). */
+  const gearPatch = (h: Harness, gear: RiderView['gear'], over: Partial<RiderView> = {}): void =>
+    h.session().emitState(ridingState({ riders: { host: rider('host', { gear, positionM: 20, ...over }), ana: rider('ana') } }));
+  /** The server's answer to the command numbered `seq`: applied at `at`, her controls from then on. */
+  const answer = (h: Harness, seq: number, at: number, requestedGear: RiderView['gear'], line: 'center' | 'angle' = 'center'): void =>
+    h.session().emitMessage({ type: 'control-applied', seq, at, requestedGear, line });
+  /** Pace, and the server's answer at once (applied now): her requested gear is `gear` from now on. */
+  const paceAnswered = (h: Harness, gear: RiderView['gear']): void => {
+    press(h, GEAR);
+    answer(h, h.session().seqOfLast('gear'), h.clock.now(), gear);
+  };
+
+  it("Codex's Pace cycle back to extended, the first extended patch arriving stale: the band and the hint stay gallop's until the server's answer takes it out of the gallop, exactly from that answer's moment", async () => {
+    const h = await inRound();
+    const t0 = h.clock.now() + 1_000;
+    approachOwn(h, 1, 1, t0, 5);
+    expect(half(h)).toBeCloseTo(band(CLEAN), 9);
+    const seqs: number[] = [];
+    for (const at of [t0 - 400, t0 - 300, t0 - 200, t0 - 100]) {
+      h.clock.t = at;
+      press(h, GEAR);
+      seqs.push(h.session().seqOfLast('gear'));
+    }
+    expect(h.session().sentOf('gear').map((m) => m.gear)).toEqual(['extended', 'gallop', 'collected', 'extended']);
+    expect([...new Set(seqs)].sort((a, b) => a - b)).toEqual(seqs); // numbered, one each, in the order they went out
+    h.clock.t = t0 + 25;
+    gearPatch(h, 'extended'); // formed when only the first Pace had reached the server
+    expect(half(h)).toBeCloseTo(band(GALLOP_CLEAN), 9);
+    h.clock.t = t0 + 100;
+    press(h, TAP); // clean for collected or extended, a fall for the gallop the judge may still hold
+    expect(caption(h)).toBe(hinted('caida'));
+    answer(h, seqs[0] ?? -1, t0 - 330, 'extended');
+    answer(h, seqs[1] ?? -1, t0 - 230, 'gallop');
+    expect(half(h)).toBeCloseTo(band(GALLOP_CLEAN), 9);
+    h.clock.t = t0 + 160;
+    answer(h, seqs[2] ?? -1, t0 + 150, 'collected'); // a slow network: collected applied only after her tap
+    expect(half(h)).toBeCloseTo(band(CLEAN), 9); // from t0 + 150 collected, or the last Pace's extended
+    expect(half(h, t0 + 149)).toBeCloseTo(band(GALLOP_CLEAN), 9); // a moment before it the server held the gallop
+    answer(h, seqs[3] ?? -1, t0 + 170, 'extended');
+    gearPatch(h, 'gallop'); // a stale patch settles nothing, either way
+    expect(half(h, t0 + 200)).toBeCloseTo(band(CLEAN), 9);
+  });
+
+  it('gallop confirmed before the autopilot → a collected patch under it → the autopilot off: the very next frame and a tap before any new patch read the gallop (finding 2)', async () => {
+    const h = await inRound();
+    paceAnswered(h, 'extended');
+    paceAnswered(h, 'gallop');
+    gearPatch(h, 'gallop');
+    h.clock.t += 500;
+    h.session().emitMessage(roundEvent({ type: 'autopilot', riderId: 'host', at: h.clock.now(), on: true }));
+    gearPatch(h, 'collected', { autopilot: true }); // the state shows the gear in force: collected under the autopilot
+    const t0 = h.clock.now() + 1_000;
+    approachOwn(h, 1, 1, t0, 5);
+    expect(half(h)).toBeCloseTo(band(CLEAN), 9);
+    h.clock.t = t0 - 200;
+    h.session().emitMessage(roundEvent({ type: 'autopilot', riderId: 'host', at: h.clock.now(), on: false }));
+    expect(half(h)).toBeCloseTo(band(GALLOP_CLEAN), 9);
+    h.clock.t = t0 + 100;
+    press(h, TAP);
+    expect(caption(h)).toBe(hinted('caida'));
+  });
+
+  it("the same through a reconnection: the approach-sync hands control back with the server's gallop — a frame and a tap before any new patch read it", async () => {
+    const h = await inRound();
+    paceAnswered(h, 'extended');
+    paceAnswered(h, 'gallop');
+    gearPatch(h, 'gallop');
+    h.session().emitStatus('dropped');
+    h.clock.t += 2_000;
+    h.session().emitStatus('connected');
+    gearPatch(h, 'collected', { autopilot: true }); // the state of the time away: collected under the autopilot
+    const t0 = h.clock.now() + 1_000;
+    h.session().emitMessage({
+      type: 'approach-sync',
+      classNumber: 1,
+      heatIndex: 0,
+      hardTurn: false,
+      approach: { fence: 1, attempt: 1, t0, speedMps: 5 },
+      controls: { requestedGear: 'gallop', line: 'center', at: h.clock.now() },
+    });
+    expect(half(h)).toBeCloseTo(band(GALLOP_CLEAN), 9);
+    h.clock.t = t0 + 100;
+    press(h, TAP);
+    expect(caption(h)).toBe(hinted('caida'));
+  });
+
+  it('the same after a wide turn: gallop confirmed, the wide turn collects the canter until fence 1 is cleared — the approach of fence 2, before any new patch, reads the gallop', async () => {
+    /** The wide turn is a hard turn too: both tiers × 0.7 until the fence is cleared. */
+    const HARD = 0.7;
+    const h = await hostInLobby();
+    h.session().emitMessage({ type: 'class-course', course: course3, classNumber: 1 });
+    h.session().emitState(snapshot({ phase: 'walk', heatIndex: 0 }));
+    h.session().emitState(ridingState());
+    await settle();
+    paceAnswered(h, 'extended');
+    paceAnswered(h, 'gallop');
+    gearPatch(h, 'gallop');
+    turnVerdict(h, 'host', 'wide');
+    gearPatch(h, 'collected'); // the gear in force after the wide turn
+    const t0 = h.clock.now() + 1_000;
+    approachOwn(h, 1, 1, t0, 5);
+    expect(half(h)).toBeCloseTo(band(CLEAN * HARD), 9);
+    h.clock.t = t0;
+    h.session().emitMessage(roundEvent({ type: 'takeoff', riderId: 'host', fence: 1, attempt: 1, decidedAt: t0, offsetMs: 0, outcome: clean, approach: approach70 }));
+    h.clock.t += 2_000;
+    const t1 = h.clock.now() + 1_000;
+    approachOwn(h, 2, 1, t1, 5);
+    expect(half(h)).toBeCloseTo(band(GALLOP_CLEAN), 9); // the patches still say collected; the server holds her gallop
+    h.clock.t = t1 + 100;
+    press(h, TAP);
+    expect(caption(h)).toBe(hinted('caida', 2));
+  });
+
+  /** A round with the approach of fence 1 open (t0 one second ahead, 5 m/s) and her line `start` as the server holds it. */
+  async function lineRound(start: 'center' | 'angle'): Promise<{ h: Harness; t0: number }> {
+    const h = await inRound();
+    if (start === 'angle') {
+      press(h, TURN_LEFT);
+      answer(h, h.session().seqOfLast('line'), h.clock.now(), 'collected', 'angle');
+    }
+    const t0 = h.clock.now() + 1_000;
+    approachOwn(h, 1, 1, t0, 5);
+    return { h, t0 };
+  }
+
+  it('center → angle: a tap stamped before the line shift went out is the centre\'s; after it went out and before the answer, the angle\'s; after the answer, by the server\'s moment', async () => {
+    const before = await lineRound('center');
+    before.h.clock.t = before.t0 + 150;
+    press(before.h, TURN_LEFT); // → angle, out at t0 + 150
+    press(before.h, TAP, before.t0 + 140); // the finger landed before: centre, ±157.5 ms → clean
+    expect(caption(before.h)).toBe(hinted('cero_faltas'));
+
+    const inFlight = await lineRound('center');
+    inFlight.h.clock.t = inFlight.t0 + 100;
+    press(inFlight.h, TURN_LEFT);
+    expect(half(inFlight.h)).toBeCloseTo(band(ANGLE_CLEAN), 9);
+    inFlight.h.clock.t = inFlight.t0 + 140;
+    press(inFlight.h, TAP); // the judge may hold the angle: ±126 ms, a miss off the sharp line is a run-out
+    expect(caption(inFlight.h)).toBe(hinted('desvio'));
+
+    const answered = await lineRound('center');
+    answered.h.clock.t = answered.t0 + 100;
+    press(answered.h, TURN_LEFT);
+    answer(answered.h, answered.h.session().seqOfLast('line'), answered.t0 + 120, 'collected', 'angle');
+    answered.h.clock.t = answered.t0 + 140;
+    press(answered.h, TAP);
+    expect(caption(answered.h)).toBe(hinted('desvio'));
+
+    const late = await lineRound('center');
+    late.h.clock.t = late.t0 + 100;
+    press(late.h, TURN_LEFT);
+    late.h.clock.t = late.t0 + 160;
+    answer(late.h, late.h.session().seqOfLast('line'), late.t0 + 150, 'collected', 'angle'); // applied after her finger
+    press(late.h, TAP, late.t0 + 140);
+    expect(caption(late.h)).toBe(hinted('cero_faltas'));
+  });
+
+  it('angle → center (finding 3): before the send, and after it until the answer, the angle\'s window — never the centre\'s clean tap; after the answer the centre\'s', async () => {
+    const before = await lineRound('angle');
+    before.h.clock.t = before.t0 + 150;
+    press(before.h, TURN_LEFT); // → center, out at t0 + 150
+    press(before.h, TAP, before.t0 + 140);
+    expect(caption(before.h)).toBe(hinted('desvio'));
+
+    const inFlight = await lineRound('angle');
+    inFlight.h.clock.t = inFlight.t0 + 100;
+    press(inFlight.h, TURN_LEFT);
+    expect(inFlight.h.session().sentOf('line').at(-1)).toEqual({ type: 'line', line: 'center' });
+    expect(half(inFlight.h)).toBeCloseTo(band(ANGLE_CLEAN), 9);
+    inFlight.h.clock.t = inFlight.t0 + 140;
+    press(inFlight.h, TAP); // clean locally on the centre line — a run-out for the judge still on the angle
+    expect(caption(inFlight.h)).toBe(hinted('desvio'));
+
+    const answered = await lineRound('angle');
+    answered.h.clock.t = answered.t0 + 100;
+    press(answered.h, TURN_LEFT);
+    answered.h.clock.t = answered.t0 + 130;
+    answer(answered.h, answered.h.session().seqOfLast('line'), answered.t0 + 120, 'collected', 'center');
+    expect(half(answered.h)).toBeCloseTo(band(CLEAN), 9);
+    expect(half(answered.h, answered.t0 + 119)).toBeCloseTo(band(ANGLE_CLEAN), 9); // the server still had the angle then
+    answered.h.clock.t = answered.t0 + 140;
+    press(answered.h, TAP);
+    expect(caption(answered.h)).toBe(hinted('cero_faltas'));
+  });
+
+  it("a refused Pace was never applied: a 'refused' naming its seq drops it at once; a refusal naming no command changes nothing", async () => {
+    const h = await inRound();
+    const t0 = h.clock.now() + 1_000;
+    approachOwn(h, 1, 1, t0, 5);
+    press(h, GEAR); // → extended
+    press(h, GEAR); // → gallop
+    expect(half(h)).toBeCloseTo(band(GALLOP_CLEAN), 9);
+    h.session().emitMessage({ type: 'refused', error: 'not-riding' });
+    expect(half(h)).toBeCloseTo(band(GALLOP_CLEAN), 9);
+    h.session().emitMessage({ type: 'refused', error: 'not-riding', seq: h.session().seqOfLast('gear') });
+    expect(half(h)).toBeCloseTo(band(CLEAN), 9); // the extended one may be in force: as wide as collected
+    h.clock.t = t0 + 100;
+    press(h, TAP);
+    expect(caption(h)).toBe(hinted('cero_faltas'));
+  });
+
+  it("a reconnection with commands in flight: what the old connection left unanswered is possible until the sync's moment and replaced by its controls from it; a command of the new connection stays pending on top", async () => {
+    const h = await inRound();
+    press(h, GEAR); // → extended
+    press(h, GEAR); // → gallop; neither answered: the connection goes
+    h.session().emitStatus('dropped');
+    h.clock.t += 300;
+    h.session().emitStatus('connected');
+    const synced = h.clock.now();
+    h.clock.t += 20;
+    press(h, TURN_LEFT); // → angle, on the new connection, before its sync arrived
+    const t0 = h.clock.now() + 1_000;
+    h.session().emitMessage({
+      type: 'approach-sync',
+      classNumber: 1,
+      heatIndex: 0,
+      hardTurn: false,
+      approach: { fence: 1, attempt: 1, t0, speedMps: 5 },
+      controls: { requestedGear: 'collected', line: 'center', at: synced }, // the gallop never reached the server
+    });
+    expect(half(h)).toBeCloseTo(band(ANGLE_CLEAN), 9); // the lost gallop ruled out; the angle may be in force
+    expect(half(h, synced - 1)).toBeCloseTo(band(GALLOP_CLEAN), 9); // before the sync's moment it may have been
+    answer(h, h.session().seqOfLast('line'), synced + 30, 'collected', 'angle');
+    h.clock.t = t0 + 100;
+    press(h, TAP); // the angle: clean up to ±126 ms; the lost gallop would have made it a fall
+    expect(caption(h)).toBe(hinted('cero_faltas'));
+  });
+
+  it("schoolmaster ticked while the session cannot send: the checkbox is undone; back in the room, the class with the server's rules (no schoolmaster) and her gallop — the band and the hint are the gallop's", async () => {
+    const h = await hostInLobby();
+    h.session().emitStatus('dropped');
+    setChecked(h.root, '[data-assist="schoolmaster"]', true);
+    expect(h.session().sentOf('assists')).toEqual([]);
+    expect(q<HTMLInputElement>(h.root, '[data-assist="schoolmaster"]').checked).toBe(false);
+    h.session().emitStatus('connected');
+    await settle();
+    expect(q<HTMLInputElement>(h.root, '[data-assist="schoolmaster"]').checked).toBe(false);
+    const session = h.session();
+    session.emitMessage({ type: 'class-course', course, classNumber: 1 });
+    session.emitMessage({ type: 'class-rules', classNumber: 1, heightClass: 70, mode: 'ranked', assists: { schoolmaster: false, widerWindow: false } });
+    session.emitState(snapshot({ phase: 'walk', heatIndex: 0 }));
+    session.emitState(ridingState());
+    await settle();
+    paceAnswered(h, 'extended');
+    paceAnswered(h, 'gallop');
+    gearPatch(h, 'gallop');
+    const t0 = h.clock.now() + 1_000;
+    approachOwn(h, 1, 1, t0, 5);
+    expect(half(h)).toBeCloseTo(band(GALLOP_CLEAN), 9);
+    h.clock.t = t0 + 100;
+    press(h, TAP);
+    expect(caption(h)).toBe(hinted('caida'));
+  });
+
+  it("the height the server froze, not the lobby's: 'class-rules' at 90 cm narrows the band and the hint like the judge (175 × 0.7 = ±122.5 ms)", async () => {
+    const h = await hostInLobby();
+    const session = h.session();
+    session.emitMessage({ type: 'class-course', course, classNumber: 1 });
+    session.emitMessage({ type: 'class-rules', classNumber: 1, heightClass: 90, mode: 'ranked', assists: { schoolmaster: false, widerWindow: false } });
+    session.emitState(snapshot({ phase: 'walk', heatIndex: 0 }));
+    session.emitState(ridingState({ riders: { host: rider('host', { heightClass: 90 }), ana: rider('ana') } }));
+    await settle();
+    const t0 = h.clock.now() + 1_000;
+    approachOwn(h, 1, 1, t0, 5);
+    expect(half(h)).toBeCloseTo(band(122.5), 9);
+    h.clock.t = t0 + 140;
+    press(h, TAP); // clean at 70 cm; at 90 cm a late tap off the window: a chip
+    expect(caption(h)).toBe(hinted('batida_corta'));
+  });
+
+  it('negative: rules of another class change nothing, and a height choice the session could not send is undone', async () => {
+    const h = await hostInLobby();
+    h.session().emitStatus('dropped');
+    select(h.root, 'select[data-height]', '80');
+    expect(h.session().sentOf('height')).toEqual([]);
+    expect(q<HTMLSelectElement>(h.root, 'select[data-height]').value).toBe('70');
+    h.session().emitStatus('connected');
+    startClass(h);
+    h.session().emitMessage({ type: 'class-rules', classNumber: 2, heightClass: 90, mode: 'ranked', assists: { schoolmaster: true, widerWindow: false } });
+    await settle();
+    const t0 = h.clock.now() + 1_000;
+    approachOwn(h, 1, 1, t0, 5);
+    expect(half(h)).toBeCloseTo(band(CLEAN), 9);
   });
 });
