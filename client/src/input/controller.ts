@@ -8,7 +8,6 @@
 // (from its opening to its end, audit K1 r5 #2), otherwise a line shift; the pace button cycles the gear. A timed
 // press (the tap, a turn) handled too late for the judge to accept is not sent at all (audit K1 r4 #1).
 import { PACKET, type Gear } from '@open-jumps/shared';
-import { NotImplementedError } from '../errors.js';
 import type { Control } from './layout.js';
 import type { ClientRoomMessage } from '../net/types.js';
 
@@ -57,6 +56,9 @@ export interface OpenApproach {
  * too-old; then cannot-send. Only 'sent' changes anything.
  */
 export type PressOutcome = 'sent' | 'too-old' | 'not-armed' | 'already-tapped' | 'not-riding' | 'cannot-send' | 'no-control';
+
+/** Why a press of a riding rider means no message at all (what messageFor decides before the age and the session). */
+type Meaningless = Extract<PressOutcome, 'no-control' | 'not-armed' | 'already-tapped'>;
 
 /** What a press did: the message that went out (null for every outcome but 'sent') and why. */
 export interface PressResult {
@@ -172,13 +174,13 @@ export class InputController {
 
   press(control: Control, clientTime: number, handledAt: number = clientTime): PressResult {
     const state = this.state;
-    if (state === null || !state.riding) return result(null);
+    if (state === null || !state.riding) return { message: null, outcome: 'not-riding' };
     const message = this.messageFor(control, clientTime);
-    if (message === null) return result(null);
+    if (typeof message === 'string') return { message: null, outcome: message };
     // A timed press already older than the judge accepts is not a take-off or a turn of now (audit K1 r4 #1).
-    if ((message.type === 'tap' || message.type === 'turn') && handledAt - clientTime > INPUT.maxPressAgeMs) return result(null);
+    if ((message.type === 'tap' || message.type === 'turn') && handledAt - clientTime > INPUT.maxPressAgeMs) return { message: null, outcome: 'too-old' };
     // Nothing is spent unless the message really went out (audit K1 r3 #1).
-    if (!this.send(message)) return result(null);
+    if (!this.send(message)) return { message: null, outcome: 'cannot-send' };
     switch (message.type) {
       case 'tap':
         if (this.open !== null) this.open.tapped = true;
@@ -196,26 +198,27 @@ export class InputController {
       default:
         break;
     }
-    return result(message);
+    return { message, outcome: 'sent' };
   }
 
   /** True when a direction press at moment `at` would be a turn: inside [opened, opened + turnWindowMs) of an open window. */
   turnWindowOpen(at: number): boolean {
-    void at;
-    throw new NotImplementedError('InputController.turnWindowOpen (K1.1 step 2)');
+    const turnWindow = this.turnWindow;
+    return turnWindow !== null && at >= turnWindow.from && at < turnWindow.until;
   }
 
   /** The line the rider asked for last (what the line toast names). */
   get line(): 'center' | 'angle' {
-    throw new NotImplementedError('InputController.line (K1.1 step 2)');
+    return this.currentLine;
   }
 
-  /** The message a press would send now, without changing anything; null when the press means nothing. */
-  private messageFor(control: Control, clientTime: number): ClientRoomMessage | null {
+  /** The message a press would send now, without changing anything; when the press means nothing, why. */
+  private messageFor(control: Control, clientTime: number): ClientRoomMessage | Meaningless {
     switch (control) {
       case 'tap': {
         const open = this.open;
-        if (open === null || open.tapped) return null;
+        if (open === null) return 'not-armed';
+        if (open.tapped) return 'already-tapped';
         return { type: 'tap', clientTime, fence: open.fence, attempt: open.attempt };
       }
       case 'gear': {
@@ -226,14 +229,11 @@ export class InputController {
       case 'turn-left':
       case 'turn-right': {
         // A turn only at a moment inside the window, never before its opening (audit K1 r5 #2).
-        const turnWindow = this.turnWindow;
-        if (turnWindow !== null && clientTime >= turnWindow.from && clientTime < turnWindow.until) {
-          return { type: 'turn', choice: control === 'turn-left' ? 'left' : 'right', clientTime };
-        }
+        if (this.turnWindowOpen(clientTime)) return { type: 'turn', choice: control === 'turn-left' ? 'left' : 'right', clientTime };
         return { type: 'line', line: this.currentLine === 'center' ? 'angle' : 'center' };
       }
       default:
-        return null;
+        return 'no-control';
     }
   }
 
@@ -248,15 +248,3 @@ export class InputController {
   }
 }
 
-/**
- * K1.1 contract stage: the message is decided and sent exactly as in K1; the outcome that names the branch is not
- * built yet — reading it throws until the code stage.
- */
-function result(message: ClientRoomMessage | null): PressResult {
-  return {
-    message,
-    get outcome(): never {
-      throw new NotImplementedError('InputController.press outcome (K1.1 step 2)');
-    },
-  };
-}
