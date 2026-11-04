@@ -7,10 +7,6 @@
 // 667×320 — with the Safari bars) each direction button and the pace square are at least 2×2 cm
 // (LAYOUT.minButtonPx), the take-off zone at least 3×3 cm (LAYOUT.minTapPx); the top LAYOUT.hudTopFraction of
 // the height belongs to the HUD and no zone reaches into it. Portrait shows the "turn your phone" overlay instead.
-//
-// K1.1 contract stage: the phone branch of layoutFor still builds the K1 geometry (one right thumb, the direction
-// buttons at the two edges); the code stage replaces it with the left column above. Until then the phone tests of
-// K1.1 step 1 (client/test/layout.test.ts) fail on their assertions.
 
 export type Device = 'phone' | 'tablet';
 export type Control = 'turn-left' | 'turn-right' | 'gear' | 'tap';
@@ -52,12 +48,6 @@ export const LAYOUT = {
 /** The pace square: 20% of the height. */
 const GEAR_HEIGHT_FRACTION = 0.2;
 
-/**
- * K1 phone geometry, kept only until the K1.1 code stage: the direction buttons at the two edges, 18 % of the width
- * each. Not part of the layout contract any more (LAYOUT.phoneColumnFraction replaces it).
- */
-const K1_PHONE_EDGE_FRACTION = 0.18;
-
 /** Zones are whole CSS px, so shared edges meet exactly and nothing leaks past the viewport by a rounding error. */
 const px = (value: number): number => Math.round(value);
 
@@ -95,19 +85,12 @@ export function layoutFor(width: number, height: number, device: Device = device
   const buttonBottom = Math.min(px((1 + LAYOUT.buttonHeightFraction) / 2 * height), gear.y);
   const buttonHeight = Math.max(0, buttonBottom - buttonTop);
 
-  let turnLeft: Rect;
-  let turnRight: Rect;
-  if (device === 'phone') {
-    // K1 geometry until the code stage (see the file comment): the K1.1 phone layout is the left column.
-    const edge = px(K1_PHONE_EDGE_FRACTION * width);
-    turnLeft = { x: 0, y: buttonTop, w: edge, h: buttonHeight };
-    turnRight = { x: width - edge, y: buttonTop, w: edge, h: buttonHeight };
-  } else {
-    const column = px(LAYOUT.tabletColumnFraction * width);
-    const half = Math.floor(column / 2);
-    turnLeft = { x: 0, y: buttonTop, w: half, h: buttonHeight };
-    turnRight = { x: half, y: buttonTop, w: half, h: buttonHeight };
-  }
+  // One column at the left edge on both devices: Left from x 0, Right right next to it up to the column's edge (an
+  // odd column gives Right the extra pixel).
+  const column = px((device === 'phone' ? LAYOUT.phoneColumnFraction : LAYOUT.tabletColumnFraction) * width);
+  const half = Math.floor(column / 2);
+  const turnLeft: Rect = { x: 0, y: buttonTop, w: half, h: buttonHeight };
+  const turnRight: Rect = { x: half, y: buttonTop, w: column - half, h: buttonHeight };
 
   const tap: Rect = {
     x: px(LAYOUT.tapZone.x * width),
