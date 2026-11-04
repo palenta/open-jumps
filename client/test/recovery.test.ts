@@ -7,7 +7,10 @@
 // by the server as her own take-off. And a finger the page handled too late for the judge (audit K1 r4 #1) is not a
 // take-off at the moment of its handling: nothing goes out, and her next, timely tap is the one the server judges.
 // K1.1 step 7 (matrix row 16): a tap after the clean tier while the approach is still open — the marker says "late"
-// and the tap still goes out; the hint and the judge both call it a chip ("close", a rail down).
+// and the tap still goes out; the hint and the judge both call it a chip ("close", a rail down). Her device's clock
+// there is on the page's own scale (tests audit r1 #1): about a minute, as performance.now() reads in the browser,
+// against the server's epoch ms — a marker that compared the frame's device time with the server's t0 directly would
+// never read "late".
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { RoomSession, type RetrySettings } from '../src/net/roomSession.js';
 import type { RoundEventWire, ServerMessage } from '../src/net/types.js';
@@ -41,6 +44,12 @@ const RETRIABLE_DROP_CODE = 1001;
  */
 const QUICK_RETRY: RetrySettings = { minUptime: 0, maxRetries: 3, delay: 400, minDelay: 400, maxDelay: 400 };
 
+/**
+ * The skew that puts a device's clock on the page's own scale (tests audit r1 #1): in the browser the game's clock is
+ * performance.now(), ms since the page opened — about a minute here — while the server's game clock reads epoch ms.
+ */
+const pageClockSkew = (): number => 60_000 - Date.now();
+
 const roundEvents = <T extends RoundEventWire['type']>(messages: ServerMessage[], type: T, riderId: string) =>
   messages
     .filter((m): m is Extract<ServerMessage, { type: 'round-event' }> => m.type === 'round-event')
@@ -51,8 +60,8 @@ const roundEvents = <T extends RoundEventWire['type']>(messages: ServerMessage[]
  * Maria hosts in the app; her friend Ana (a plain session that also rides, passively) is the witness: the server's
  * broadcasts reach Ana while Maria is away, so the test learns Maria's t0 from Ana's copy of the 'approach' event.
  */
-async function classWithWitness(retry: RetrySettings = RETRY): Promise<{ maria: Device; app: AppUnderTest; witness: ServerMessage[]; ana: RoomSession }> {
-  const maria = await newDevice(live, 'Maria');
+async function classWithWitness(retry: RetrySettings = RETRY, mariaSkewMs = 0): Promise<{ maria: Device; app: AppUnderTest; witness: ServerMessage[]; ana: RoomSession }> {
+  const maria = await newDevice(live, 'Maria', mariaSkewMs);
   const anaDevice = await newDevice(live, 'Ana');
   const app = await appFor(maria, { retry });
   click(app.root, '[data-action="create-room"]');
@@ -211,8 +220,11 @@ describe('a touch the page handled too late for the judge (audit K1 r4 #1)', () 
 
 describe('a late tap while the approach is still open (K1.1 step 7, matrix row 16)', () => {
   it('past t0 + cleanMs the marker reads late; the tap at t0 + 250 ms still goes out, and the hint and the judge both call it batida corta with a rail', async () => {
-    const { maria, app, ana } = await classWithWitness();
+    const { maria, app, ana } = await classWithWitness(RETRY, pageClockSkew());
     const id = maria.profile.id;
+    // Her clock and the server's read on different scales: a minute against the epoch.
+    expect(maria.clock.now()).toBeLessThan(10 * 60_000);
+    expect(maria.clock.offset() ?? 0).toBeGreaterThan(1e12); // server minus device: the epoch itself
     await until(() => roundEvents(app.received, 'approach', id).length > 0, 8000, 'her approach');
     const approach = roundEvents(app.received, 'approach', id)[0];
     if (!approach) throw new Error('no approach');

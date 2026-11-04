@@ -3150,3 +3150,150 @@ describe('the debug overlay (K1.1 step 9)', () => {
     expect(h.session().sent.map((m) => m.type)).toEqual(['gear', 'line']);
   });
 });
+
+describe("the page's clock on another scale than the server's (K1.1 steps 7 and 9, matrix rows 14, 15, 19; tests audit r1 #1)", () => {
+  /**
+   * In the browser the two clocks never read alike: the server's game clock reads epoch ms, the page's clock is
+   * performance.now() — ms since the page opened. Every server time the client gets (t0) goes to device time through
+   * toClient, every device time (a frame's now, a touch) goes to server time through toServer. A formula that
+   * subtracts a time of one scale from a time of the other (frame(now) against t0, clientTime − t0) is off by this
+   * much, so every expectation below would come out different — the marker 'approach' at every frame, the forecast
+   * stuck on the patch, a local offset of −1.79e12 and 'unconfirmed'.
+   */
+  const SERVER_AHEAD = 1_793_000_000_000;
+  /** 70 cm in collected canter: the clean tier ±157.5 ms, the perfect tier ±58.5 ms. */
+  const CLEAN = 157.5;
+  const PERFECT = 58.5;
+  const track = buildTrack(course);
+
+  /** The harness clock, still measured, translating with the server SERVER_AHEAD ms ahead of the device. */
+  function skew(h: Harness): void {
+    h.clock.toClient = (serverTime) => serverTime - SERVER_AHEAD;
+    h.clock.toServer = (clientTime) => clientTime + SERVER_AHEAD;
+    h.clock.offset = () => SERVER_AHEAD;
+  }
+  /** The host riding heat 1 of class 1 on the skewed clock (the debug overlay on when asked). */
+  async function skewedRound(debug = false): Promise<Harness> {
+    const h = await hostInLobby({}, snapshot(), undefined, debug ? true : undefined);
+    skew(h);
+    startClass(h);
+    await settle();
+    expect(h.root.dataset.screen).toBe('round');
+    return h;
+  }
+  /** The marker of the frame drawn at device time `now`. */
+  const markerAt = (h: Harness, now: number) => {
+    h.game.frame(now);
+    return h.scene.frames.at(-1)?.takeoff ?? null;
+  };
+  /** The own horse in the frame drawn at device time `now`: its position along the straight one-fence course, its mode, and whether the camera follows that very point. */
+  function ownAt(h: Harness, now: number): { positionM: number | null; mode: string | null; cameraFollows: boolean } {
+    h.game.frame(now);
+    const frame = h.scene.frames.at(-1);
+    const entry = frame?.riders.find((r) => r.isOwn);
+    if (!frame || !entry) return { positionM: null, mode: frame?.ownMode ?? null, cameraFollows: false };
+    return { positionM: entry.point.x, mode: frame.ownMode, cameraFollows: JSON.stringify(frame.camera) === JSON.stringify(chaseCamera(entry.point)) };
+  }
+  const expectOwnAt = (h: Harness, now: number, positionM: number, mode: string): void => {
+    const seen = ownAt(h, now);
+    expect(seen.mode, `mode at ${String(now)}`).toBe(mode);
+    expect(seen.positionM ?? Number.NaN, `position at ${String(now)}`).toBeCloseTo(positionM, 6);
+    expect(seen.cameraFollows, 'the camera follows the drawn position').toBe(true);
+    expect(pointAt(track, positionM).x).toBeCloseTo(positionM, 9); // the straight course: position = x
+  };
+  /** A state patch with the own horse at `positionM` (Ana stays at 0 m). */
+  const patch = (h: Harness, positionM: number): void => h.session().emitState(ridingState({ riders: { host: rider('host', { positionM }), ana: rider('ana') } }));
+  const tapControl = (h: Harness): HTMLElement => q(h.root, '[data-control="tap"]');
+
+  it('the marker: t0 is server time, the frame device time — every state boundary falls at toClient(t0) ± the tier on the device clock', async () => {
+    const h = await skewedRound();
+    const t0 = h.clock.now() + SERVER_AHEAD + 1_000; // one second ahead on the server's clock
+    const at = t0 - SERVER_AHEAD; // the take-off moment on the device clock
+    approachOwn(h, 1, 1, t0, 5);
+    expect(tapControl(h).getAttribute('data-takeoff-at')).toBe(String(at)); // the lit zone (K1) reads the same translation
+    const first = markerAt(h, h.clock.now());
+    expect(first).toMatchObject({ fence: 1, distanceM: 30, state: 'approach' });
+    expect(first?.cleanHalfM).toBeCloseTo((CLEAN / 1000) * 5, 9); // the band does not depend on the clock's scale
+    expect(markerAt(h, at - CLEAN - 1)?.state).toBe('approach');
+    expect(markerAt(h, at - CLEAN)?.state).toBe('clean');
+    expect(markerAt(h, at - PERFECT - 1)?.state).toBe('clean');
+    expect(markerAt(h, at - PERFECT)?.state).toBe('perfect');
+    expect(markerAt(h, at)?.state).toBe('perfect');
+    expect(markerAt(h, at + PERFECT)?.state).toBe('perfect');
+    expect(markerAt(h, at + PERFECT + 1)?.state).toBe('clean');
+    expect(markerAt(h, at + CLEAN)?.state).toBe('clean');
+    expect(markerAt(h, at + CLEAN + 1)?.state).toBe('late');
+  });
+
+  it("the own horse: the forecast runs on toServer(now) against the server's t0, the camera on the same point, and stops at the take-off point", async () => {
+    const h = await skewedRound();
+    const t0 = h.clock.now() + SERVER_AHEAD + 1_000;
+    const at = t0 - SERVER_AHEAD;
+    patch(h, 24);
+    approachOwn(h, 1, 1, t0, 5);
+    expectOwnAt(h, at - 1_000, 25, 'forecast'); // 30 − 5 × 1.0
+    expectOwnAt(h, at - 500, 27.5, 'forecast');
+    expectOwnAt(h, at - CLEAN, 30 - 5 * 0.1575, 'forecast');
+    expectOwnAt(h, at, 30, 'forecast');
+    expectOwnAt(h, at + 300, 30, 'forecast'); // never past the take-off point
+  });
+
+  it("the debug overlay: the local offset is clientTime − toClient(t0), so the judge's offsetMs (toServer(clientTime) − t0) confirms it", async () => {
+    const h = await skewedRound(true);
+    const t0 = h.clock.now() + SERVER_AHEAD + 1_000;
+    const at = t0 - SERVER_AHEAD;
+    approachOwn(h, 1, 1, t0, 5);
+    h.clock.t = at + 40;
+    press(h, TAP, at + 30);
+    expect(h.session().sentOf('tap')).toEqual([{ type: 'tap', clientTime: at + 30, fence: 1, attempt: 1 }]); // device time goes out (K1)
+    const row = (): HTMLElement => q(h.root, '[data-debug] [data-debug-press]');
+    expect(row().dataset).toMatchObject({ zone: 'tap', clientTime: String(at + 30), handledAt: String(at + 40), outcome: 'sent', localOffset: '30', judge: 'pending' });
+    h.session().emitMessage(roundEvent({ type: 'takeoff', riderId: 'host', fence: 1, attempt: 1, decidedAt: t0 + 400, offsetMs: 45, outcome: clean, approach: approach70 }));
+    expect(row().dataset).toMatchObject({ judge: 'accepted', judgeOffset: '45', localOffset: '30' });
+    // An early finger: a negative offset on both sides, still within 20 ms.
+    const early = await skewedRound(true);
+    const t1 = early.clock.now() + SERVER_AHEAD + 1_000;
+    const at1 = t1 - SERVER_AHEAD;
+    approachOwn(early, 1, 1, t1, 5);
+    early.clock.t = at1 - 20;
+    press(early, TAP, at1 - 25);
+    const earlyRow = (): HTMLElement => q(early.root, '[data-debug] [data-debug-press]');
+    expect(earlyRow().dataset).toMatchObject({ outcome: 'sent', localOffset: '-25', judge: 'pending' });
+    early.session().emitMessage(roundEvent({ type: 'takeoff', riderId: 'host', fence: 1, attempt: 1, decidedAt: t1 + 400, offsetMs: -12, outcome: clean, approach: approach70 }));
+    expect(earlyRow().dataset).toMatchObject({ judge: 'accepted', judgeOffset: '-12', localOffset: '-25' });
+  });
+
+  it('an approach known before the clock: the outline and the patch while it is not measured, then the forecast and the marker from the first frame after the measurement', async () => {
+    const device = { t: 50_000 };
+    const clock = new ClientClock(() => device.t);
+    const serverNow = (): number => device.t + SERVER_AHEAD;
+    const h = await hostInLobby({}, snapshot(), clock);
+    startClass(h);
+    await settle();
+    expect(h.root.dataset.screen).toBe('round');
+    const t0 = serverNow() + 3_000;
+    patch(h, 15);
+    approachOwn(h, 1, 1, t0, 5);
+    expect(clock.ready()).toBe(false);
+    expect(markerAt(h, device.t)).toMatchObject({ fence: 1, state: 'approach' });
+    expect(ownAt(h, device.t)).toMatchObject({ positionM: 15, mode: 'patch', cameraFollows: true });
+    expect(tapControl(h).hasAttribute('data-takeoff-at')).toBe(false);
+    // The join series: three pings 200 ms apart, each handled by the clock first, then by the game (as the session does).
+    for (let i = 0; i < 3; i += 1) {
+      clock.onPing(serverNow());
+      h.session().emitMessage({ type: 'clock-ping', serverSent: serverNow() });
+      device.t += 200;
+    }
+    expect(clock.offset()).toBe(SERVER_AHEAD);
+    const at = t0 - SERVER_AHEAD;
+    // t0 is 2.4 s ahead on the server's clock now: 30 − 5 × 2.4 = 18 m, ahead of the 15 m of the patch.
+    expectOwnAt(h, device.t, 18, 'forecast');
+    expect(markerAt(h, device.t)?.state).toBe('approach');
+    expectOwnAt(h, at - 1_000, 25, 'forecast');
+    expect(markerAt(h, at - CLEAN)?.state).toBe('clean');
+    expect(markerAt(h, at)?.state).toBe('perfect');
+    expectOwnAt(h, at, 30, 'forecast');
+    expect(markerAt(h, at + CLEAN + 1)?.state).toBe('late');
+    expect(tapControl(h).getAttribute('data-takeoff-at')).toBe(String(at));
+  });
+});
