@@ -4,9 +4,9 @@
 // reconnects by itself while the tab lives and the session reports the outcome (connected again, or lost for good
 // once the retries are exhausted); with them off, resume() reconnects by the reconnection token on
 // visibilitychange / pageshow.
-import type { CourseSpec } from '@open-jumps/shared';
+import { HEIGHT_CLASSES, type CourseSpec, type Gear, type HeightClass, type RoundMode } from '@open-jumps/shared';
 import type { ClientClock } from './clientClock.js';
-import { KICKED_CLOSE_CODE, SESSION_REVOKED_CLOSE_CODE, type ClientRoomMessage, type LobbyStateSnapshot, type ServerMessage } from './types.js';
+import { KICKED_CLOSE_CODE, SESSION_REVOKED_CLOSE_CODE, type ClientRoomMessage, type ControlState, type Line, type LobbyStateSnapshot, type ServerMessage } from './types.js';
 
 /** The SDK's retry settings the session may override (tests shorten them; production keeps the SDK's defaults). */
 export interface RetrySettings {
@@ -84,7 +84,16 @@ const FIRST_STATE_TIMEOUT_MS = 5000;
  *   onReconnect callback, so the stored copy is refreshed a microtask later too (audit K1 r1 #10).
  * - send() while not connected (dropped, connecting) sends nothing and returns false — a rider command is useless
  *   late and the server has autopilot — so the caller can keep the input unspent (audit K1 r3 #1); true when the
- *   message was handed to the room.
+ *   message was handed to the room. send(message, seq) numbers a 'gear' or 'line' command (K1.1 code audit r2): the
+ *   payload goes out with that seq, which the server's answer names; the caller owns the numbering. A seq given with
+ *   any other message is not sent.
+ * - K1.1 code audit r2 — the server's answers about the rider's controls and rules, each handed on only when well
+ *   formed (a number is finite, a seq a safe integer ≥ 0, a gear or line one of the closed ids, a height one of the
+ *   classes, a mode 'ranked' or 'training', the assists two booleans): 'control-applied' { seq (or null), at,
+ *   requestedGear, line } — dropped otherwise; 'class-rules' { classNumber, heightClass, mode, assists } — dropped
+ *   otherwise; 'refused' carries seq only when the server named a valid one; an 'approach-sync' carries controls
+ *   { requestedGear, line, at } only when all three are present and valid — never dropped for them (the approach still
+ *   arms the tap).
  */
 export class RoomSession {
   private readonly sdk: SdkLike;
@@ -161,9 +170,10 @@ export class RoomSession {
    * Hands the message to the room and returns true; while not connected (dropped, connecting, ended, idle) nothing is
    * sent and the answer is false, so the caller knows the input never left (audit K1 r3 #1).
    */
-  send(message: ClientRoomMessage): boolean {
+  send(message: ClientRoomMessage, seq?: number): boolean {
     if (this.currentStatus !== 'connected' || this.room === null) return false;
-    this.room.send('room', message);
+    const numbered = seq !== undefined && (message.type === 'gear' || message.type === 'line');
+    this.room.send('room', numbered ? { ...message, seq } : message);
     return true;
   }
 
@@ -316,6 +326,18 @@ function speedOf(value: unknown): number | null {
   return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : null;
 }
 
+const GEARS: ReadonlySet<unknown> = new Set<Gear>(['collected', 'extended', 'gallop']);
+const LINES: ReadonlySet<unknown> = new Set<Line>(['center', 'angle']);
+const MODES: ReadonlySet<unknown> = new Set<RoundMode>(['ranked', 'training']);
+
+const isFiniteNumber = (value: unknown): value is number => typeof value === 'number' && Number.isFinite(value);
+const isSeq = (value: unknown): value is number => typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
+
+/** The rider's controls as the server sent them (K1.1 code audit r2), or null when either is not one of the closed ids. */
+function controlsOf(p: Record<string, unknown>): ControlState | null {
+  return GEARS.has(p.requestedGear) && LINES.has(p.line) ? { requestedGear: p.requestedGear as Gear, line: p.line as Line } : null;
+}
+
 /** A wire message into its ServerMessage shape; unknown types are dropped. */
 function decode(type: string, payload: unknown): ServerMessage | null {
   const p = (payload ?? {}) as Record<string, unknown>;
@@ -344,6 +366,7 @@ function decode(type: string, payload: unknown): ServerMessage | null {
       const approach = (p.approach ?? null) as Record<string, unknown> | null;
       const valid = approach !== null && typeof approach.fence === 'number' && typeof approach.attempt === 'number' && typeof approach.t0 === 'number';
       if (typeof p.classNumber !== 'number' || typeof p.heatIndex !== 'number' || (approach !== null && !valid)) return null;
+      const controls = controlsOf(p);
       return {
         type,
         classNumber: p.classNumber,
@@ -353,12 +376,40 @@ function decode(type: string, payload: unknown): ServerMessage | null {
           approach === null
             ? null
             : { fence: approach.fence as number, attempt: approach.attempt as number, t0: approach.t0 as number, speedMps: speedOf(approach.speedMps) },
+        // The controls come all together or not at all; their absence never drops the sync (K1.1 code audit r2).
+        ...(controls !== null && isFiniteNumber(p.at) ? { controls: { ...controls, at: p.at } } : {}),
+      };
+    }
+    case 'control-applied': {
+      const controls = controlsOf(p);
+      if (controls === null || !isFiniteNumber(p.at) || !(p.seq === null || isSeq(p.seq))) return null;
+      return { type, seq: p.seq, at: p.at, ...controls };
+    }
+    case 'class-rules': {
+      const assists = (p.assists ?? null) as Record<string, unknown> | null;
+      const heightClass = p.heightClass;
+      if (
+        typeof p.classNumber !== 'number' ||
+        !(HEIGHT_CLASSES as readonly unknown[]).includes(heightClass) ||
+        !MODES.has(p.mode) ||
+        assists === null ||
+        typeof assists.schoolmaster !== 'boolean' ||
+        typeof assists.widerWindow !== 'boolean'
+      ) {
+        return null;
+      }
+      return {
+        type,
+        classNumber: p.classNumber,
+        heightClass: heightClass as HeightClass,
+        mode: p.mode as RoundMode,
+        assists: { schoolmaster: assists.schoolmaster, widerWindow: assists.widerWindow },
       };
     }
     case 'class-table':
       return { type, table: (p.table ?? {}) as Extract<ServerMessage, { type: 'class-table' }>['table'] };
     case 'refused':
-      return { type, error: typeof p.error === 'string' ? p.error : 'unknown' };
+      return { type, error: typeof p.error === 'string' ? p.error : 'unknown', ...(isSeq(p.seq) ? { seq: p.seq } : {}) };
     case 'emote':
       return { type, from: String(p.from ?? ''), emote: p.emote as Extract<ServerMessage, { type: 'emote' }>['emote'] };
     default:

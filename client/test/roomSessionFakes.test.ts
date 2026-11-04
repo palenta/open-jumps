@@ -329,3 +329,118 @@ describe('RoomSession.send tells whether the message went out (audit K1 r3 #1)',
     expect([...room.sent, ...next.sent].filter((m) => (m as { type: string }).type === 'room')).toEqual([]);
   });
 });
+
+describe('K1.1 code audit r2: the controls and rules the server judges with, on the wire', () => {
+  /** Every message a session hands on after these payloads are delivered. */
+  async function decoded(...payloads: [string, unknown][]): Promise<ServerMessage[]> {
+    const { room, session } = await connected(true);
+    const messages: ServerMessage[] = [];
+    session.onMessage((message) => messages.push(message));
+    for (const [type, payload] of payloads) room.deliver(type, payload);
+    return messages;
+  }
+
+  it('send(message, seq) numbers a gear or a line command on the wire; without seq, or for any other message, the payload is as given', async () => {
+    const { room, session } = await connected(true);
+    expect(session.send({ type: 'gear', gear: 'gallop' }, 7)).toBe(true);
+    expect(session.send({ type: 'line', line: 'angle' }, 8)).toBe(true);
+    expect(session.send({ type: 'gear', gear: 'collected' })).toBe(true);
+    expect(session.send({ type: 'tap', clientTime: 6000, fence: 1, attempt: 1 }, 9)).toBe(true);
+    expect(room.sent).toEqual([
+      { type: 'room', payload: { type: 'gear', gear: 'gallop', seq: 7 } },
+      { type: 'room', payload: { type: 'line', line: 'angle', seq: 8 } },
+      { type: 'room', payload: { type: 'gear', gear: 'collected' } },
+      { type: 'room', payload: { type: 'tap', clientTime: 6000, fence: 1, attempt: 1 } },
+    ]);
+    room.drop(1006);
+    expect(session.send({ type: 'gear', gear: 'extended' }, 10)).toBe(false); // nothing goes out while dropped
+    expect(room.sent).toHaveLength(4);
+  });
+
+  it("'control-applied' reaches the listeners with its seq (or null), its server moment and the controls after it", async () => {
+    expect(
+      await decoded(
+        ['control-applied', { seq: 3, at: 61_250, requestedGear: 'gallop', line: 'angle' }],
+        ['control-applied', { seq: null, at: 61_300, requestedGear: 'collected', line: 'center' }],
+        ['control-applied', { seq: 0, at: 61_301.5, requestedGear: 'extended', line: 'center' }],
+      ),
+    ).toEqual([
+      { type: 'control-applied', seq: 3, at: 61_250, requestedGear: 'gallop', line: 'angle' },
+      { type: 'control-applied', seq: null, at: 61_300, requestedGear: 'collected', line: 'center' },
+      { type: 'control-applied', seq: 0, at: 61_301.5, requestedGear: 'extended', line: 'center' },
+    ]);
+  });
+
+  it("negative: a malformed 'control-applied' is dropped — a seq that is no safe integer from 0, a moment that is no finite number, a gear or line off the list, a missing field", async () => {
+    const good = { seq: 3, at: 61_250, requestedGear: 'gallop', line: 'angle' };
+    const bad: unknown[] = [
+      { ...good, seq: -1 },
+      { ...good, seq: 1.5 },
+      { ...good, seq: '3' },
+      { ...good, seq: undefined },
+      { ...good, at: Number.NaN },
+      { ...good, at: Number.POSITIVE_INFINITY },
+      { ...good, at: '61250' },
+      { ...good, requestedGear: 'warp' },
+      { ...good, line: 'left' },
+      { seq: 3, at: 61_250, requestedGear: 'gallop' },
+      null,
+    ];
+    expect(await decoded(...bad.map((payload): [string, unknown] => ['control-applied', payload]))).toEqual([]);
+  });
+
+  it("'refused' names the seq of the refused command when the server sent a valid one; otherwise it is { error } as before", async () => {
+    expect(
+      await decoded(
+        ['refused', { error: 'not-riding', seq: 4 }],
+        ['refused', { error: 'not-riding', seq: 0 }],
+        ['refused', { error: 'not-riding' }],
+        ['refused', { error: 'not-riding', seq: -2 }],
+        ['refused', { error: 'clock-not-ready', seq: 'x' }],
+      ),
+    ).toEqual([
+      { type: 'refused', error: 'not-riding', seq: 4 },
+      { type: 'refused', error: 'not-riding', seq: 0 },
+      { type: 'refused', error: 'not-riding' },
+      { type: 'refused', error: 'not-riding' },
+      { type: 'refused', error: 'clock-not-ready' },
+    ]);
+  });
+
+  it("'approach-sync' hands on the rider's controls with the sync's moment; one without them, or with any of them malformed, still arms (no controls)", async () => {
+    const base = { classNumber: 1, heatIndex: 0, hardTurn: false, approach: null };
+    expect(
+      await decoded(
+        ['approach-sync', { ...base, requestedGear: 'gallop', line: 'angle', at: 70_000 }],
+        ['approach-sync', base],
+        ['approach-sync', { ...base, requestedGear: 'gallop', line: 'angle' }],
+        ['approach-sync', { ...base, requestedGear: 'trot', line: 'angle', at: 70_000 }],
+        ['approach-sync', { ...base, requestedGear: 'gallop', line: 'angle', at: Number.NaN }],
+      ),
+    ).toEqual([
+      { type: 'approach-sync', ...base, controls: { requestedGear: 'gallop', line: 'angle', at: 70_000 } },
+      { type: 'approach-sync', ...base },
+      { type: 'approach-sync', ...base },
+      { type: 'approach-sync', ...base },
+      { type: 'approach-sync', ...base },
+    ]);
+  });
+
+  it("'class-rules' reaches the listeners as sent; a malformed one is dropped", async () => {
+    const rules = { classNumber: 2, heightClass: 80, mode: 'ranked', assists: { schoolmaster: true, widerWindow: false } };
+    expect(
+      await decoded(
+        ['class-rules', rules],
+        ['class-rules', { ...rules, mode: 'training', assists: { schoolmaster: false, widerWindow: true } }],
+        ['class-rules', { ...rules, heightClass: 65 }],
+        ['class-rules', { ...rules, mode: 'casual' }],
+        ['class-rules', { ...rules, assists: { schoolmaster: 'yes', widerWindow: false } }],
+        ['class-rules', { ...rules, assists: undefined }],
+        ['class-rules', { ...rules, classNumber: '2' }],
+      ),
+    ).toEqual([
+      { type: 'class-rules', ...rules },
+      { type: 'class-rules', ...rules, mode: 'training', assists: { schoolmaster: false, widerWindow: true } },
+    ]);
+  });
+});

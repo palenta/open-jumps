@@ -4,6 +4,7 @@
 // check these against the real server (type-level assignability AND actual responses), so drift is caught.
 import type {
   ApproachState,
+  AssistSettings,
   CourseSpec,
   EliminationReason,
   EmoteId,
@@ -11,6 +12,7 @@ import type {
   HeightClass,
   PonyCategory,
   RiderStatus,
+  RoundMode,
   TakeoffOutcome,
   TurnChoice,
   TurnOutcome,
@@ -126,7 +128,15 @@ export interface LobbyStateSnapshot {
 
 // ---- the live room: messages ---------------------------------------------------------------------------------
 
-/** What a client may send (payload of the 'room' message); the server validates and authorises every one. */
+/** The line of the approach the rider asked for. */
+export type Line = 'center' | 'angle';
+
+/**
+ * What a client may send (payload of the 'room' message); the server validates and authorises every one. A 'gear' or
+ * 'line' command may carry seq (K1.1 code audit r2): the client's own number for it, a safe integer ≥ 0, monotonic per
+ * page (RoomSession.send adds it on the wire when the caller numbers the command); the server answers every gear and
+ * line command by it — 'control-applied' when applied, 'refused' { error, seq } when not.
+ */
 export type ClientRoomMessage =
   | { type: 'admit'; accountId: string }
   | { type: 'deny'; accountId: string }
@@ -138,8 +148,8 @@ export type ClientRoomMessage =
   | { type: 'emote'; emote: EmoteId }
   | { type: 'tap'; clientTime: number; fence: number; attempt: number }
   | { type: 'turn'; choice: TurnChoice; clientTime: number }
-  | { type: 'gear'; gear: Gear }
-  | { type: 'line'; line: 'center' | 'angle' }
+  | { type: 'gear'; gear: Gear; seq?: number }
+  | { type: 'line'; line: Line; seq?: number }
   | { type: 'height'; heightClass: HeightClass }
   | { type: 'assists'; schoolmaster: boolean; widerWindow: boolean }
   | { type: 'clock-pong'; serverSent: number; clientTime: number };
@@ -196,10 +206,43 @@ export type ServerMessage =
    * null when none is (between fences, in flight, stopped), with the hard-turn flag in force (audit K1 r2 #1). The
    * approach carries its frozen speedMps (K1.1 step 5), decoded as in the 'approach' event (null: without speed).
    */
-  | { type: 'approach-sync'; classNumber: number; heatIndex: number; hardTurn: boolean; approach: { fence: number; attempt: number; t0: number; speedMps: number | null } | null }
+  | {
+      type: 'approach-sync';
+      classNumber: number;
+      heatIndex: number;
+      hardTurn: boolean;
+      approach: { fence: number; attempt: number; t0: number; speedMps: number | null } | null;
+      /**
+       * K1.1 code audit r2: the rider's controls as the server holds them at `at` (server ms, the moment the sync was
+       * sent), every command it received applied — sent on the wire as the sync's requestedGear, line and at. Whatever an
+       * earlier connection sent and never heard answered was applied before `at` or never; from `at` on these are her
+       * controls until her next command. Left out when the server sent none of them, or any is malformed.
+       */
+      controls?: ControlState & { at: number };
+    }
+  /**
+   * K1.1 code audit r2 — to the sender only, for every gear and line command the server applied: seq as the command
+   * carried it (null for one without), `at` the server's receive time it is applied at (server ms: the judge reads the
+   * command from that moment on), requestedGear and line the rider's controls once it is applied. Dropped when
+   * malformed.
+   */
+  | ({ type: 'control-applied'; seq: number | null; at: number } & ControlState)
+  /**
+   * K1.1 code audit r2 — to a rider of the class only: what the server froze for her at start-class and judges her
+   * rounds with (her height class, the mode, her assists), whatever the lobby says now. Sent right after
+   * 'class-course' (at the start and on a join during the class) and on a reconnection. Dropped when malformed.
+   */
+  | { type: 'class-rules'; classNumber: number; heightClass: HeightClass; mode: RoundMode; assists: AssistSettings }
   | { type: 'class-table'; table: ClassTableWire }
-  | { type: 'refused'; error: string }
+  /** A refusal; seq names the gear or line command refused, when it carried one (K1.1 code audit r2). */
+  | { type: 'refused'; error: string; seq?: number }
   | { type: 'emote'; from: string; emote: EmoteId };
+
+/** The rider's controls as the server holds them (K1.1 code audit r2): the gear she asked for and her line. */
+export interface ControlState {
+  requestedGear: Gear;
+  line: Line;
+}
 
 /** WebSocket close codes the server uses (LobbyRoom). */
 export const KICKED_CLOSE_CODE = 4100;
