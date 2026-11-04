@@ -360,7 +360,12 @@ interface RoundModules {
  *     fence.distanceM)); its half-lengths markerHalfLengths(window, speedMps) with window =
  *     round.hint.approachWindow.windowAt(now) — the very window the instant hint judges with (step 6) — and the
  *     speedMps of the 'approach' / 'approach-sync' (frozen: a later gear change changes cleanMs, never the speed);
- *     its state markerState(clock.toServer(now), t0, window, speedMps). It goes at the own 'takeoff' verdict (no
+ *     its state markerState(clock.toServer(now), t0, window, speedMps). The gear of that window (K1.1 code audit r1,
+ *     finding 1): the state patches' gear, and every pace press that went out from its moment on — until a patch
+ *     confirms it, the narrower window of the gear before it and the gear asked for, so the band and the hint never
+ *     promise more than the judge, who takes the change at its receipt, may use; a stale patch neither undoes nor
+ *     flickers it; the schoolmaster, the own autopilot and a wide turn (until the fence is cleared) keep the canter
+ *     collected whatever was pressed (ApproachWindow). It goes at the own 'takeoff' verdict (no
  *     bright marker after it), with an 'approach-sync' without an approach, at a new class, heat or session; another
  *     rider's approach changes nothing. The arena frees the marker's resources with the course.
  *   · The own horse's visible position — one value, the camera follows it — is chosen by OwnHorseMode: 'forecast'
@@ -511,13 +516,17 @@ export function createGame(deps: GameDeps): Game {
     return captionOf(locale, round.caption.event, { rider: captionNames.riderName, pony: captionNames.ponyName, ponyGender: captionNames.ponyGender });
   }
 
-  /** Hands a message to the session; true when it went out (a line the server never heard changes nothing here). */
+  /**
+   * Hands a message to the session; true when it went out (a line or a gear the server never heard changes nothing
+   * here). A gear that went out reaches the shared window at once, dated now (K1.1 code audit r1, finding 1).
+   */
   function send(message: ClientRoomMessage): boolean {
     const went = session?.send(message) ?? false;
     if (went && message.type === 'line' && round) {
       round.requestedLine = message.line;
       round.hint.setLine(message.line);
     }
+    if (went && message.type === 'gear' && round) round.hint.requestGear(message.gear, deps.clock.now());
     return went;
   }
 
@@ -598,7 +607,10 @@ export function createGame(deps: GameDeps): Game {
       nextFence: own?.nextFence ?? 1,
       attempt: own?.attempt ?? 1,
     });
-    if (own) round.hint.setGear(own.gear);
+    if (own) {
+      round.hint.setAutopilot(own.autopilot);
+      round.hint.setGear(own.gear);
+    }
     if (current.phase === 'riding') {
       round.roundClock.onPatch(current.roundClockMs, deps.clock.now());
       for (const [id, rider] of Object.entries(current.riders)) {
@@ -643,6 +655,7 @@ export function createGame(deps: GameDeps): Game {
         if (own) {
           round.controller.turnTaken();
           round.hint.setHardTurn(event.outcome.hardTurn);
+          if (event.outcome.quality === 'wide') round.hint.wideTurn();
           round.chosen = null;
           qualifyDebugTurn(event.outcome.quality);
         }
@@ -658,7 +671,10 @@ export function createGame(deps: GameDeps): Game {
         round.caption = { event: { type: 'eliminated', reason: event.reason }, riderId: event.riderId };
         break;
       case 'autopilot':
-        if (own) round.autopilot = event.on;
+        if (own) {
+          round.autopilot = event.on;
+          round.hint.setAutopilot(event.on);
+        }
         round.caption = { event: { type: 'autopilot', on: event.on }, riderId: event.riderId };
         break;
       case 'waiting':

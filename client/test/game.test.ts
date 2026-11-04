@@ -2802,6 +2802,167 @@ describe('the take-off marker in the frames of the round (K1.1 step 7)', () => {
   });
 });
 
+describe('a Pace that went out reaches the shared window at once (K1.1 code audit r1, finding 1)', () => {
+  /**
+   * 70 cm, straight, no hard turn: collected and extended ±157.5 ms clean, gallop ±78.75 ms. The judge dates a gear
+   * change at its receipt, which the client never learns: from the press until a patch confirms it, the band and the
+   * hint take the narrower window of the two gears.
+   */
+  const CLEAN = 157.5;
+  const GALLOP_CLEAN = 78.75;
+  /** The band's clean half-length at 5 m/s for a clean half-width in ms. */
+  const band = (cleanMs: number): number => (cleanMs / 1000) * 5;
+  const half = (h: Harness, now = h.clock.now()): number | null => {
+    h.game.frame(now);
+    return h.scene.frames.at(-1)?.takeoff?.cleanHalfM ?? null;
+  };
+  /** A state patch of heat 1 showing the own horse in `gear` (Ana in collected canter). */
+  const gearPatch = (h: Harness, gear: RiderView['gear'], over: Partial<RiderView> = {}): void =>
+    h.session().emitState(ridingState({ riders: { host: rider('host', { gear, positionM: 20, ...over }), ana: rider('ana') } }));
+  const caption = (h: Harness): string => text(h.root.querySelector('[data-hud-caption]'));
+  /** The caption of the instant hint for the own horse at fence `fence`. */
+  const hinted = (label: string, fence = 1): string => captionOf('en', { type: 'takeoff', label, fence }, { rider: 'Maria', pony: 'Dakota', ponyGender: 'yegua' });
+  const lastGear = (h: Harness): string | undefined => h.session().sentOf('gear').at(-1)?.gear;
+  /** The host riding heat 1 in extended canter, as the server confirmed it, with the approach of fence 1 open (t0 one second ahead, 5 m/s). */
+  async function extendedApproach(): Promise<{ h: Harness; t0: number }> {
+    const h = await inRound();
+    press(h, GEAR);
+    gearPatch(h, 'extended');
+    const t0 = h.clock.now() + 1_000;
+    approachOwn(h, 1, 1, t0, 5);
+    expect(half(h)).toBeCloseTo(band(CLEAN), 9);
+    return { h, t0 };
+  }
+
+  it('Pace to gallop: the band of the very next frame and the hint of a tap 100 ms late, both before any patch, are gallop\'s — caída, as the judge may give', async () => {
+    const { h, t0 } = await extendedApproach();
+    h.clock.t = t0 - 100;
+    press(h, GEAR);
+    expect(lastGear(h)).toBe('gallop');
+    expect(half(h)).toBeCloseTo(band(GALLOP_CLEAN), 9);
+    h.clock.t = t0 + 100;
+    expect(half(h)).toBeCloseTo(band(GALLOP_CLEAN), 9);
+    press(h, TAP); // clean for extended (±157.5 ms), a fall for gallop (±78.75 ms)
+    expect(caption(h)).toBe(hinted('caida'));
+  });
+
+  it('a late stale patch neither undoes the Pace nor flickers the band; the confirming patch settles it, and a tap stamped before that patch is still judged by the narrower', async () => {
+    const { h, t0 } = await extendedApproach();
+    h.clock.t = t0 - 100;
+    press(h, GEAR); // → gallop
+    const halves: (number | null)[] = [];
+    const sample = (): void => {
+      halves.push(half(h));
+      h.clock.t += 20;
+    };
+    sample();
+    gearPatch(h, 'extended'); // stale: from before the server had the change
+    sample();
+    sample();
+    gearPatch(h, 'extended'); // another one, later still
+    for (let i = 0; i < 5; i += 1) sample();
+    h.clock.t = t0 + 110;
+    gearPatch(h, 'gallop'); // the confirming patch
+    sample();
+    gearPatch(h, 'gallop');
+    sample();
+    expect(halves).toHaveLength(10);
+    for (const value of halves) expect(value).toBeCloseTo(band(GALLOP_CLEAN), 9);
+    press(h, TAP, t0 + 100); // stamped before the confirming patch, handled after it: the judge may have had either gear then
+    expect(caption(h)).toBe(hinted('caida'));
+  });
+
+  it('a tap stamped before the Pace went out is judged by the gear before it', async () => {
+    const { h, t0 } = await extendedApproach();
+    h.clock.t = t0 - 5;
+    press(h, GEAR); // → gallop, handled 5 ms before t0
+    press(h, TAP, t0 - 10); // the finger landed before: extended, perfecta (gallop would make it cero faltas)
+    expect(caption(h)).toBe(hinted('perfecta'));
+  });
+
+  it('back to collected: the band stays gallop\'s, through a stale patch, until the patch that confirms collected — never wider before the server\'s word', async () => {
+    const h = await inRound();
+    press(h, GEAR);
+    press(h, GEAR); // collected → extended → gallop
+    gearPatch(h, 'gallop');
+    const t0 = h.clock.now() + 1_000;
+    approachOwn(h, 1, 1, t0, 5);
+    expect(half(h)).toBeCloseTo(band(GALLOP_CLEAN), 9);
+    h.clock.t = t0 - 200;
+    press(h, GEAR); // gallop → collected
+    expect(lastGear(h)).toBe('collected');
+    expect(half(h)).toBeCloseTo(band(GALLOP_CLEAN), 9);
+    h.clock.t += 50;
+    gearPatch(h, 'gallop'); // stale
+    expect(half(h)).toBeCloseTo(band(GALLOP_CLEAN), 9);
+    h.clock.t = t0 + 100;
+    press(h, TAP); // the judge may still be in gallop: caída, never the cero faltas of collected
+    expect(caption(h)).toBe(hinted('caida'));
+    gearPatch(h, 'collected'); // the confirming patch
+    expect(half(h)).toBeCloseTo(band(CLEAN), 9);
+  });
+
+  it('forced collected first — the schoolmaster: the band stays collected whatever she pressed, even while the patches still show the gallop she asked for between the fences', async () => {
+    const h = await hostInLobby();
+    setChecked(h.root, '[data-assist="schoolmaster"]', true);
+    startClass(h);
+    await settle();
+    press(h, GEAR);
+    press(h, GEAR); // → gallop
+    gearPatch(h, 'gallop');
+    const t0 = h.clock.now() + 1_000;
+    approachOwn(h, 1, 1, t0, 5);
+    expect(half(h)).toBeCloseTo(band(CLEAN), 9);
+    h.clock.t = t0 - 100;
+    press(h, GEAR); // → collected
+    press(h, GEAR); // → extended
+    expect(half(h)).toBeCloseTo(band(CLEAN), 9);
+  });
+
+  it('forced collected first — the own autopilot: a Pace that goes out while it is on leaves the band collected; once it is off, the Pace counts again until a patch settles it', async () => {
+    const { h, t0 } = await extendedApproach();
+    h.session().emitMessage(roundEvent({ type: 'autopilot', riderId: 'host', at: h.clock.now(), on: true }));
+    gearPatch(h, 'collected', { autopilot: true }); // the server collects the canter under the autopilot
+    h.clock.t = t0 - 300;
+    press(h, GEAR); // → gallop
+    expect(lastGear(h)).toBe('gallop');
+    expect(half(h)).toBeCloseTo(band(CLEAN), 9);
+    h.session().emitMessage(roundEvent({ type: 'autopilot', riderId: 'host', at: h.clock.now(), on: false }));
+    expect(half(h)).toBeCloseTo(band(GALLOP_CLEAN), 9); // the patches still say collected; the judge may already have gallop
+    gearPatch(h, 'gallop', { autopilot: false });
+    expect(half(h)).toBeCloseTo(band(GALLOP_CLEAN), 9);
+  });
+
+  it('forced collected first — a wide turn: collected until the fence is cleared, whatever she pressed; at the next fence her Pace counts again', async () => {
+    /** The wide turn is a hard turn too: both tiers × 0.7 until the fence is cleared — collected ±110.25 ms, gallop ±55.125 ms. */
+    const HARD = 0.7;
+    const h = await hostInLobby();
+    h.session().emitMessage({ type: 'class-course', course: course3, classNumber: 1 });
+    h.session().emitState(snapshot({ phase: 'walk', heatIndex: 0 }));
+    h.session().emitState(ridingState());
+    await settle();
+    press(h, GEAR);
+    gearPatch(h, 'extended');
+    turnVerdict(h, 'host', 'wide');
+    gearPatch(h, 'collected'); // the server collects the canter after the wide turn
+    press(h, GEAR); // → gallop
+    expect(lastGear(h)).toBe('gallop');
+    const t0 = h.clock.now() + 1_000;
+    approachOwn(h, 1, 1, t0, 5);
+    expect(half(h)).toBeCloseTo(band(CLEAN * HARD), 9);
+    h.clock.t = t0 + 100;
+    press(h, TAP); // collected: cero faltas, as the judge gives it (in gallop a fall)
+    expect(caption(h)).toBe(hinted('cero_faltas'));
+    h.session().emitMessage(roundEvent({ type: 'takeoff', riderId: 'host', fence: 1, attempt: 1, decidedAt: h.clock.now(), offsetMs: 100, outcome: clean, approach: approach70 }));
+    h.clock.t += 2_000;
+    const t1 = h.clock.now() + 1_000;
+    approachOwn(h, 2, 1, t1, 5);
+    expect(half(h)).toBeCloseTo(band(GALLOP_CLEAN), 9); // the patches still say collected; the judge may already have gallop
+    gearPatch(h, 'gallop', { positionM: 50, nextFence: 2 });
+    expect(half(h)).toBeCloseTo(band(GALLOP_CLEAN), 9);
+  });
+});
+
 describe('the own horse on the approach: one visible position, the camera with it (K1.1 step 7)', () => {
   const track = buildTrack(course);
   /** The own horse in the latest frame at `now`, its mode, and whether the camera follows that very point. */

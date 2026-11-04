@@ -43,15 +43,16 @@ interface OpenApproach {
 const favourableRoll = (): number => 1;
 
 /**
- * What the client knows about its own approach — its best guess, never the truth: gear from the state, the
- * line from its own command, a hard turn from its own last turn outcome; spooks and the lead-horse bonus are
- * unknown here (false), so the hint can only be stricter than the server, never more generous.
+ * What the client knows about its own approach — its best guess, never the truth: gear from the state and the
+ * rider's own pace presses, the line from its own command, a hard turn from its own last turn outcome; spooks and
+ * the lead-horse bonus are unknown here (false), so the hint can only be stricter than the server, never more generous.
  *
  * K1.1 step 6 — the shared source: the hint is built over an ApproachWindow (the one given, or its own for the
  * context) and exposes it as approachWindow, so the game draws the take-off marker from the very object the hint
  * judges with. tap(clientTime) judges with approachWindow.stateAt(clientTime) and approachWindow.windowAt(clientTime);
- * setGear (at the clock's now), setLine, setHardTurn and configure forward to it, and a cleared verdict spends its
- * hard turn (clearedFence). assumedApproach moves into ApproachWindow — no second copy stays here.
+ * setGear (at the clock's now), requestGear, setLine, setHardTurn, setAutopilot, wideTurn and configure forward to
+ * it, a cleared verdict spends its hard turn and its wide turn (clearedFence), and an 'approach-sync' tells it that
+ * the rider took control back (controlRegained). assumedApproach moves into ApproachWindow — no second copy stays here.
  */
 export class InstantHint {
   private readonly clock: ClientClock;
@@ -82,9 +83,11 @@ export class InstantHint {
   /**
    * The server's 'approach-sync' on taking control back (audit K1 r2 #1): its hard-turn flag, and the approach open
    * now — the same approach keeps its tap and hint; another one opens afresh; null closes the one whose verdict was
-   * missed.
+   * missed. The window source hears that control was regained first (the pace presses sent before it settle with the
+   * next patch, no wide turn is assumed any more).
    */
   sync(sync: { hardTurn: boolean; approach: { fence: number; attempt: number; t0: number } | null }): void {
+    this.source.controlRegained();
     this.source.setHardTurn(sync.hardTurn);
     const next = sync.approach;
     if (next === null) {
@@ -100,6 +103,21 @@ export class InstantHint {
   /** The gear the state reports, in force from the clock's now on (a tap stamped before it still reads the gear before). */
   setGear(gear: Gear): void {
     this.source.setGear(gear, this.clock.now());
+  }
+
+  /** The rider's own pace press went out at device time `at`: the narrower of its gear and the gear before it until a patch confirms it. */
+  requestGear(gear: Gear, at: number): void {
+    this.source.requestGear(gear, at);
+  }
+
+  /** The own autopilot as the server last told it: collected while it is on. */
+  setAutopilot(on: boolean): void {
+    this.source.setAutopilot(on);
+  }
+
+  /** The own turn verdict was 'wide': collected until the fence is cleared, as the server keeps it. */
+  wideTurn(): void {
+    this.source.wideTurn();
   }
 
   setLine(line: 'center' | 'angle'): void {
