@@ -509,7 +509,8 @@ export class CourseRunner {
     }
     // An approach that opened inside this stretch is ridden on at its frozen speed for the rest of it, as every later
     // moment of the approach is: the position at `to` is fence − speed × (t0 − to), never the zone entry held back.
-    if (this.phase === 'approach' && time < to) this.move(time, to, events);
+    // (The phase is read afresh: atBoundary above may have opened the approach.)
+    if ((this.phase as RunnerPhase) === 'approach' && time < to) this.move(time, to, events);
   }
 
   /** The next course boundary ahead while running: a turn zone, an approach zone (unless a turn is open) or the finish line. */
