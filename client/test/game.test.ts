@@ -3001,6 +3001,7 @@ describe('the debug overlay (K1.1 step 9)', () => {
     const h = await boot({ debug: true, script: { me: [failed(401, 'unauthenticated')] } });
     expect(h.root.dataset.screen).toBe('signin');
     expect(h.root.querySelector('[data-debug]')).not.toBeNull();
+    expect(shown(h.root.querySelector('[data-debug]'))).toBe(true);
   });
 
   it('a tap that went out: every field of the press, the local offset at the press, then the judge\'s offset — accepted within 20 ms', async () => {
@@ -3140,6 +3141,62 @@ describe('the debug overlay (K1.1 step 9)', () => {
     const stats = q(h.root, '[data-debug] [data-debug-stats]');
     expect(Math.abs(Number(stats.dataset.fps) - 50)).toBeLessThanOrEqual(1);
     expect(stats.dataset.calls).toBe('7');
+  });
+
+  it('what the owner reads is the text: the outcome, both offsets in whole ms, the judge word, the quality of a turn, and the line of FPS and draw calls', async () => {
+    const h = await debugRound();
+    h.scene.calls = 7;
+    const t0 = h.clock.now() + 1_000;
+    approachOwn(h, 1, 1, t0, 5);
+    h.clock.t = t0 + 40;
+    press(h, TAP, t0 + 30.4); // a stamp with a fraction, as performance.now() gives it: the text rounds it
+    expect(shown(q(h.root, '[data-debug]'))).toBe(true);
+    const pending = text(newest(h));
+    expect(pending).toContain('tap');
+    expect(pending).toContain('sent');
+    expect(pending).toContain('local 30 ms');
+    expect(pending).toContain('pending');
+    expect(pending).not.toMatch(/judge -?\d+ ms/); // no judge's offset yet
+    takeoffOwn(h, 44.6); // 14.2 ms from the local estimate
+    const judged = text(newest(h));
+    expect(judged).toContain('sent');
+    expect(judged).toContain('local 30 ms');
+    expect(judged).toContain('judge 45 ms');
+    expect(judged).toContain('accepted');
+    expect(judged).not.toContain('pending');
+    turnAheadOwn(h);
+    h.clock.t += 400;
+    press(h, TURN_LEFT);
+    turnVerdict(h, 'host', 'wide');
+    const turn = text(newest(h));
+    expect(turn).toContain('turn-left');
+    expect(turn).toContain('sent');
+    expect(turn).toContain('wide');
+    for (let i = 0; i <= 50; i += 1) h.game.frame(h.clock.now() + i * 20);
+    const stats = (): HTMLElement => q(h.root, '[data-debug] [data-debug-stats]');
+    expect(text(stats())).toContain(`FPS ${String(stats().dataset.fps)}`);
+    expect(text(stats())).toContain('draw calls 7');
+    h.scene.calls = null;
+    h.game.frame(h.clock.now() + 1_020);
+    h.game.frame(h.clock.now() + 1_040); // the line may show the count of the frame before
+    expect(text(stats())).toContain('draw calls n/a');
+    // The other words of the judge, as read: 'unconfirmed' with both numbers, 'no-tap' with no judge's offset.
+    const off = await debugRound();
+    const t1 = off.clock.now() + 1_000;
+    approachOwn(off, 1, 1, t1, 5);
+    off.clock.t = t1 + 10;
+    press(off, TAP, t1);
+    off.session().emitMessage(roundEvent({ type: 'takeoff', riderId: 'host', fence: 1, attempt: 1, decidedAt: off.clock.now(), offsetMs: 21, outcome: clean, approach: approach70 }));
+    expect(text(q(off.root, '[data-debug] [data-debug-press]'))).toMatch(/(?=.*local 0 ms)(?=.*judge 21 ms)(?=.*unconfirmed)/);
+    const none = await debugRound();
+    const t2 = none.clock.now() + 1_000;
+    approachOwn(none, 1, 1, t2, 5);
+    none.clock.t = t2 + 10;
+    press(none, TAP, t2);
+    none.session().emitMessage(roundEvent({ type: 'takeoff', riderId: 'host', fence: 1, attempt: 1, decidedAt: none.clock.now(), offsetMs: null, outcome: clean, approach: approach70 }));
+    const noTap = text(q(none.root, '[data-debug] [data-debug-press]'));
+    expect(noTap).toContain('no-tap');
+    expect(noTap).not.toMatch(/judge -?\d+ ms/);
   });
 
   it('negative: the overlay sends nothing — the session hears only the gameplay messages', async () => {

@@ -11,6 +11,12 @@
 // abierto), never "¡Recto!" or "recorrido equivocado". The walk lasts 20 s now, so the round screen is awaited with
 // room to spare. The code stage proves once, by sabotage and without a commit, that this route fails when the turn is
 // not sent and when the button is covered by an element outside the arena.
+// K1.1 step 9 (matrix row 19; tests audit r1 #2): the friend's phone opens the page as "/?debug", the host's as "/".
+// The friend's debug panel is on screen from the sign-in on and her taps and her turn go through it (it takes no
+// touch); after her first real tap and the judge's verdict the panel's TEXT — what the owner reads on the phone, not
+// the data attributes — names the outcome, the local and the judge's offsets in whole ms, the judge's word, and the
+// line of FPS and draw calls. The host's page never has a panel. A page that does not take the flag from its address
+// fails here.
 // Run with `npx playwright test -c client/e2e/playwright.config.ts` after `npx playwright install chromium`
 // (a browser download — done together with the owner). Not part of `npm test`.
 import { expect, test, type Browser, type BrowserContext, type Locator, type Page } from '@playwright/test';
@@ -64,9 +70,9 @@ async function submit(form: Locator): Promise<void> {
   await form.evaluate((element) => (element as HTMLFormElement).requestSubmit());
 }
 
-/** A fresh phone: register a rider with a pony, land on home. */
-async function register(page: Page, riderName: string, ponyName: string): Promise<void> {
-  await page.goto('/');
+/** A fresh phone: open the page at `path` (the address with its query), register a rider with a pony, land on home. */
+async function register(page: Page, riderName: string, ponyName: string, path = '/'): Promise<void> {
+  await page.goto(path);
   await expectScreen(page, 'signin');
   const form = page.locator('form[data-form="register"]');
   if (!(await form.isVisible())) {
@@ -202,6 +208,43 @@ async function takeTurn(page: Page, direction: 'left' | 'right', ponyName: strin
   expect(await captionsShown(page, new RegExp(`^${ponyName}: (¡Recto!|recorrido equivocado)`))).toBe(false);
 }
 
+/** The text of a locator as a person reads it (innerText: what is rendered), the whitespace collapsed. */
+async function readText(locator: Locator): Promise<string> {
+  return (await locator.innerText()).replace(/\s+/g, ' ').trim();
+}
+
+/**
+ * The debug panel of a page opened with "/?debug" (K1.1 step 9) after a real tap and the judge's verdict on it: the
+ * panel is visible, and the text of the tap's row reads the outcome "sent", "local <n> ms" and "judge <n> ms" (the
+ * offsets of its data attributes rounded to whole ms) and the judge's word, accepted or unconfirmed; the line under
+ * the rows reads the frames per second and the draw calls.
+ */
+async function expectDebugReadOut(page: Page): Promise<void> {
+  const panel = page.locator('[data-debug]');
+  await expect(panel).toBeVisible();
+  const row = panel.locator('[data-debug-press][data-zone="tap"]').first();
+  await expect(row).toBeVisible();
+  await expect(row).toHaveAttribute('data-outcome', 'sent');
+  await expect(row).toHaveAttribute('data-judge', /^(accepted|unconfirmed)$/, { timeout: 10_000 });
+  const local = Number.parseFloat((await row.getAttribute('data-local-offset')) ?? 'NaN');
+  const judge = Number.parseFloat((await row.getAttribute('data-judge-offset')) ?? 'NaN');
+  const word = (await row.getAttribute('data-judge')) ?? '';
+  expect(Number.isFinite(local), 'data-local-offset is a number').toBe(true);
+  expect(Number.isFinite(judge), 'data-judge-offset is a number').toBe(true);
+  const read = await readText(row);
+  expect(read).toContain('sent');
+  expect(read).toContain(`local ${String(Math.round(local))} ms`);
+  expect(read).toContain(`judge ${String(Math.round(judge))} ms`);
+  expect(read).toContain(word);
+  const stats = panel.locator('[data-debug-stats]');
+  await expect(stats).toBeVisible();
+  const line = await readText(stats);
+  const fps = /FPS (\d+)/.exec(line);
+  expect(fps, `the FPS on the line "${line}"`).not.toBeNull();
+  expect(Number(fps?.[1] ?? 0)).toBeGreaterThan(0); // the render loop is running
+  expect(line).toMatch(/draw calls (\d+|n\/a)/);
+}
+
 /**
  * The host starts the next class from the results screen. The server refuses start-class while the class is
  * still in its results phase (15 s), so the button is pressed again every two seconds until the walk is on.
@@ -238,10 +281,13 @@ test('create → code → ring → admit → heights → walk with the map → r
     const friend = await newPage();
 
     // Two riders on two phones, two ponies (so a caption names whose fence it is).
-    await register(host, HOST_NAME, 'Dakota');
-    await register(friend, FRIEND_NAME, 'Luna');
+    // The friend's phone opens the page with the debug overlay asked for in its address; the host's without.
+    await register(host, HOST_NAME, 'Dakota', '/');
+    await register(friend, FRIEND_NAME, 'Luna', '/?debug');
     await expect(host.locator('[data-hello]')).toHaveText(`${HOST_NAME} on Dakota`);
     await expect(friend.locator('[data-hello]')).toHaveText(`${FRIEND_NAME} on Luna`);
+    await expect(friend.locator('[data-debug]')).toBeVisible();
+    await expect(host.locator('[data-debug]')).toHaveCount(0);
 
     // The host creates a room and reads the code off the lobby.
     await host.locator('[data-action="create-room"]').click();
@@ -284,6 +330,9 @@ test('create → code → ring → admit → heights → walk with the map → r
     const firstTurn = walk.turns[0] ?? 'left';
     expect(walk.firstTurnBefore).toBeLessThanOrEqual(3);
     await tapAtFence(friend, 1, 'Luna');
+    // Her real tap and the judge's verdict, as the debug panel shows them to the person holding the phone.
+    await expectDebugReadOut(friend);
+    await expect(host.locator('[data-debug]')).toHaveCount(0);
     if (walk.firstTurnBefore === 2) await takeTurn(friend, firstTurn, 'Luna');
     await tapAtFence(friend, 2, 'Luna');
     if (walk.firstTurnBefore === 3) await takeTurn(friend, firstTurn, 'Luna');

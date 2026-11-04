@@ -370,6 +370,14 @@ interface RoundModules {
  *   · A turn that went out carries data-turn-quality: outcome.quality of the own 'turn' verdict ('' until it arrives).
  *   · [data-debug-stats] below the rows: data-fps — the frames per second over the last second of frame(now) calls
  *     (the count of frames in (now − 1000, now]) — and data-calls, scene.drawCalls() ('' when null).
+ *   · What the owner reads on the phone is the panel's TEXT (English, not localized: a developer tool), not its
+ *     attributes: every row reads its data-zone and its data-outcome word ("tap", "sent"); a tap that went out also
+ *     reads "local <n> ms" and its data-judge word ("pending", "accepted", "unconfirmed", "no-tap"), and once the
+ *     judge's offset is known "judge <n> ms" — <n> the offset rounded to a whole millisecond (Math.round; the
+ *     attributes keep the unrounded values); a turn reads its data-turn-quality word once known. [data-debug-stats]
+ *     reads "FPS <data-fps>" and "draw calls <data-calls>" ("draw calls n/a" when drawCalls() is null). The panel is
+ *     visible (no hidden attribute, never display none) and takes no touch (pointer-events: none): a finger on a
+ *     control under it reaches the arena as it would without the panel.
  * - Lifecycle: document 'visibilitychange' (visible) and window 'pageshow' → session.resume(); window 'resize' →
  *   resize(). destroy() removes the listeners, leaves the session and disposes the scene.
  * - Names (captions, the labels over the horses, the heat screen, the class table) come from the state's
