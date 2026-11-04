@@ -4,7 +4,7 @@
 // fly-over alone showed one fence at a time and no turns). A pure function of the CourseSpec: the geometry is the
 // arena's own (track.ts — buildTrack, pointAt, fencePose), never a second copy of it.
 import type { CourseSpec, TurnDirection } from '@open-jumps/shared';
-import { NotImplementedError } from '../errors.js';
+import { buildTrack, fencePose, pointAt, type TrackPoint } from '../scene/track.js';
 
 /** A point of the map in its own units (the SVG user space): x to the right, y downwards. */
 export interface MapPoint {
@@ -73,7 +73,38 @@ export const WALK_MAP = {
  * its 1.5 m landing offset); turns from pointAt at their distance, with the course's direction.
  */
 export function walkMap(course: CourseSpec, box: MapBox = WALK_MAP.box): WalkMap {
-  void course;
-  void box;
-  throw new NotImplementedError('walkMap (K1.1 step 4)');
+  const track = buildTrack(course);
+  const steps = Math.max(1, Math.ceil(track.lengthM / WALK_MAP.maxStepM));
+  const ground: TrackPoint[] = [];
+  for (let i = 0; i <= steps; i += 1) ground.push(pointAt(track, (i / steps) * track.lengthM));
+  const poses = course.fences.map((fence) => ({ number: fence.number, pose: fencePose(track, course, fence.number) }));
+  const turns = [...course.turns].sort((a, b) => a.distanceM - b.distanceM).map((turn) => ({ turn, point: pointAt(track, turn.distanceM) }));
+
+  // The extent of everything drawn, on the ground; the larger ratio of it to the box decides the one scale.
+  const all = [...ground, ...poses.map((p) => p.pose), ...turns.map((t) => t.point)];
+  const minX = Math.min(...all.map((p) => p.x));
+  const maxX = Math.max(...all.map((p) => p.x));
+  const minZ = Math.min(...all.map((p) => p.z));
+  const maxZ = Math.max(...all.map((p) => p.z));
+  const innerW = box.width - 2 * box.margin;
+  const innerH = box.height - 2 * box.margin;
+  const fits = [maxX - minX > 0 ? innerW / (maxX - minX) : Infinity, maxZ - minZ > 0 ? innerH / (maxZ - minZ) : Infinity];
+  const fitted = Math.min(...fits);
+  const scale = Number.isFinite(fitted) ? fitted : 1;
+  // Centred in the box along the axis it does not fill.
+  const offsetX = box.margin + (innerW - (maxX - minX) * scale) / 2 - minX * scale;
+  const offsetY = box.margin + (innerH - (maxZ - minZ) * scale) / 2 - minZ * scale;
+  const project = (point: { x: number; z: number }): MapPoint => ({ x: offsetX + scale * point.x, y: offsetY + scale * point.z });
+
+  const path = ground.map(project);
+  return {
+    box,
+    scale,
+    project,
+    path,
+    fences: poses.map(({ number, pose }) => ({ number, at: project(pose), heading: pose.heading })),
+    turns: turns.map(({ turn, point }) => ({ direction: turn.direction, distanceM: turn.distanceM, at: project(point) })),
+    start: path[0] ?? project(pointAt(track, 0)),
+    finish: path[path.length - 1] ?? project(pointAt(track, track.lengthM)),
+  };
 }
