@@ -45,9 +45,13 @@ const assumed = (over: Partial<ApproachState> = {}): ApproachState => ({
 const judged = (offsetMs: number | null, over: Partial<ApproachState> = {}, rules: RoundRules = RANKED_NO_ASSISTS): TakeoffOutcome =>
   judgeAttempt(assumed(over), offsetMs, favourable, rules);
 
-/** A ready clock whose server runs `offset` ms ahead of the device (three pings 200 ms apart, device at 10 000). */
+/**
+ * A ready clock whose server runs `offset` ms ahead of the device (three pings 200 ms apart, device at 1 000). Its
+ * now() (1 600) comes before every tap the tests stamp, as a gear the state reports always reaches the hint before
+ * the taps it applies to: the hint keeps a gear from the clock's now on (K1.1 step 6, ApproachWindow).
+ */
 function readyClock(offset: number): ClientClock {
-  let t = 10_000;
+  let t = 1_000;
   const clock = new ClientClock(() => t);
   for (let i = 0; i < 3; i += 1) {
     clock.onPing(t + offset);
