@@ -2799,6 +2799,10 @@ describe('the take-off marker in the frames of the round (K1.1 step 7)', () => {
     const h = await inRound();
     const t0 = h.clock.now() + 1_000;
     approachOwn(h, 1, 1, t0, 5);
+    // The change is the server's answer to her Pace (K1.1 code audit r2): the patch's gear alone settles nothing.
+    press(h, GEAR);
+    press(h, GEAR); // → gallop
+    h.session().emitMessage({ type: 'control-applied', seq: h.session().seqOfLast('gear'), at: h.clock.now(), requestedGear: 'gallop', line: 'center' });
     h.session().emitState(ridingState({ riders: { host: rider('host', { gear: 'gallop', positionM: 20 }), ana: rider('ana') } }));
     h.clock.t += 100;
     expect(marker(h)?.cleanHalfM).toBeCloseTo((CLEAN * 0.5 / 1000) * 5, 9);
@@ -2892,7 +2896,7 @@ describe('a Pace that went out reaches the shared window at once (K1.1 code audi
     expect(caption(h)).toBe(hinted('perfecta'));
   });
 
-  it('back to collected: the band stays gallop\'s, through a stale patch, until the patch that confirms collected — never wider before the server\'s word', async () => {
+  it('back to collected: the band stays gallop\'s, through a stale patch and a patch showing collected, until the server\'s answer to that Pace — never wider before the server\'s word', async () => {
     const h = await inRound();
     press(h, GEAR);
     press(h, GEAR); // collected → extended → gallop
@@ -2910,14 +2914,18 @@ describe('a Pace that went out reaches the shared window at once (K1.1 code audi
     h.clock.t = t0 + 100;
     press(h, TAP); // the judge may still be in gallop: caída, never the cero faltas of collected
     expect(caption(h)).toBe(hinted('caida'));
-    gearPatch(h, 'collected'); // the confirming patch
-    expect(half(h)).toBeCloseTo(band(CLEAN), 9);
+    gearPatch(h, 'collected'); // K1.1 code audit r2: a patch is no confirmation, whatever gear it shows
+    expect(half(h)).toBeCloseTo(band(GALLOP_CLEAN), 9);
+    h.session().emitMessage({ type: 'control-applied', seq: h.session().seqOfLast('gear'), at: h.clock.now(), requestedGear: 'collected', line: 'center' });
+    expect(half(h)).toBeCloseTo(band(CLEAN), 9); // the server's answer: collected from its moment on
   });
 
-  it('forced collected first — the schoolmaster: the band stays collected whatever she pressed, even while the patches still show the gallop she asked for between the fences', async () => {
+  it('forced collected first — the schoolmaster the server froze: the band stays collected whatever she pressed, even while the patches still show the gallop she asked for between the fences', async () => {
     const h = await hostInLobby();
     setChecked(h.root, '[data-assist="schoolmaster"]', true);
     startClass(h);
+    // K1.1 code audit r2: the window takes the rules from the server ('class-rules'), never from the lobby's checkbox.
+    h.session().emitMessage({ type: 'class-rules', classNumber: 1, heightClass: 70, mode: 'ranked', assists: { schoolmaster: true, widerWindow: false } });
     await settle();
     press(h, GEAR);
     press(h, GEAR); // → gallop

@@ -103,74 +103,77 @@ describe('ApproachWindow.windowAt', () => {
   });
 });
 
-describe("ApproachWindow — the rider's own pace presses (K1.1 code audit r1, finding 1)", () => {
+describe("ApproachWindow — the rider's own pace presses (K1.1 code audit r1, finding 1; since r2 settled by the server's answers alone)", () => {
   const schoolmaster: RoundRules = { mode: 'ranked', assists: freezeForRound({ schoolmaster: true, widerWindow: false }) };
+  const answer = (seq: number, at: number, requestedGear: 'collected' | 'extended' | 'gallop') => ({ seq, at, requestedGear, line: 'center' as const });
 
-  it('requestGear: from the moment it went out the narrower of the patches\' gear and the requested one; before it the patches\' gear alone', () => {
+  it("sent: from the moment it went out the narrower of the log's gear and the requested one; before it the log's gear alone", () => {
     const narrowing = new ApproachWindow(context70);
     narrowing.setGear('extended', 1_000);
-    narrowing.requestGear('gallop', 2_000);
+    narrowing.sent(1, { gear: 'gallop' }, 2_000);
     expect(narrowing.stateAt(1_999).gear).toBe('extended');
     expect(narrowing.stateAt(2_000).gear).toBe('gallop');
     expect(narrowing.windowAt(2_500).cleanMs).toBeCloseTo(CLEAN_70 * WINDOW_MODIFIERS.gallop, 9);
     const widening = new ApproachWindow(context70);
     widening.setGear('gallop', 1_000);
-    widening.requestGear('collected', 2_000);
+    widening.sent(1, { gear: 'collected' }, 2_000);
     expect(widening.stateAt(2_500).gear).toBe('gallop'); // the judge may still be in gallop
     const even = new ApproachWindow(context70);
-    even.requestGear('extended', 2_000);
-    expect(even.stateAt(2_500).gear).toBe('collected'); // the same window: the patches' gear is read
+    even.sent(1, { gear: 'extended' }, 2_000);
+    expect(even.stateAt(2_500).gear).toBe('collected'); // the same window: the log's gear is read
   });
 
-  it('a patch settles in order: the gear it shows settles every press up to the newest that asked for it; a stale patch or a gear nobody asked for settles nothing', () => {
+  it("the server's answers settle in order, each command at its own moment; an entry of the log that no answer brought settles nothing", () => {
     const window = new ApproachWindow(context70);
-    window.requestGear('extended', 1_000);
-    window.requestGear('gallop', 1_100);
-    window.setGear('collected', 1_150); // stale
+    window.sent(1, { gear: 'extended' }, 1_000);
+    window.sent(2, { gear: 'gallop' }, 1_100);
+    window.setGear('collected', 1_150); // an entry of the log: the gallop is still in flight
     expect(window.stateAt(1_160).gear).toBe('gallop');
-    window.setGear('extended', 1_200); // the first press arrived, the second not yet
+    window.applied(answer(1, 1_190, 'extended')); // the first press arrived, the second not yet
     expect(window.stateAt(1_210).gear).toBe('gallop');
-    window.requestGear('collected', 1_250);
-    window.setGear('gallop', 1_300);
+    window.sent(3, { gear: 'collected' }, 1_250);
+    window.applied(answer(2, 1_290, 'gallop'));
     expect(window.stateAt(1_310).gear).toBe('gallop');
-    window.setGear('collected', 1_400); // the last press arrived: all settled
+    window.applied(answer(3, 1_400, 'collected')); // the last press arrived: all settled
     expect(window.stateAt(1_400).gear).toBe('collected');
+    expect(window.stateAt(1_399).gear).toBe('gallop'); // the server held the gallop until then
   });
 
-  it("a gear the patches already showed is no news: a cycle of presses back to it settles only once the newest press asking for it is PACKET.maxAgeMs old", () => {
+  it("a cycle of presses back to the log's gear is no proof of anything: gallop's window however long it lasts — no PACKET.maxAgeMs rule — until the server's answers", () => {
     const window = new ApproachWindow(context70);
     window.setGear('collected', 0);
-    window.requestGear('extended', 1_000);
-    window.requestGear('gallop', 1_050);
-    window.requestGear('collected', 1_100);
-    window.setGear('collected', 1_150); // stale — or the three already arrived: the client cannot tell
+    window.sent(1, { gear: 'extended' }, 1_000);
+    window.sent(2, { gear: 'gallop' }, 1_050);
+    window.sent(3, { gear: 'collected' }, 1_100);
     expect(window.stateAt(1_200).gear).toBe('gallop');
-    window.setGear('collected', 1_100 + PACKET.maxAgeMs - 1);
-    expect(window.stateAt(1_100 + PACKET.maxAgeMs - 1).gear).toBe('gallop');
-    window.setGear('collected', 1_100 + PACKET.maxAgeMs);
-    expect(window.stateAt(1_100 + PACKET.maxAgeMs).gear).toBe('collected');
+    expect(window.stateAt(1_100 + PACKET.maxAgeMs).gear).toBe('gallop');
+    expect(window.stateAt(60_000).gear).toBe('gallop');
+    window.applied(answer(1, 1_040, 'extended'));
+    window.applied(answer(2, 1_090, 'gallop'));
+    window.applied(answer(3, 1_140, 'collected'));
+    expect(window.stateAt(1_139).gear).toBe('gallop');
+    expect(window.stateAt(1_140).gear).toBe('collected');
   });
 
-  it('controlRegained: the presses sent before it are settled by the next patch whatever it shows; a press after it waits as usual', () => {
+  it("synced: the presses of a lost connection are settled by the sync's controls from its moment; a press after it waits for its own answer", () => {
     const window = new ApproachWindow(context70);
     window.setGear('collected', 0);
-    window.requestGear('gallop', 1_000); // lost with the old connection
-    window.controlRegained();
-    window.setGear('collected', 1_200);
+    window.sent(1, { gear: 'gallop' }, 1_000); // lost with the old connection
+    window.connectionLost();
+    window.synced({ at: 1_200, requestedGear: 'collected', line: 'center' });
     expect(window.stateAt(1_300).gear).toBe('collected');
-    window.requestGear('gallop', 1_300);
-    window.setGear('collected', 1_350); // stale
+    window.sent(2, { gear: 'gallop' }, 1_300);
     expect(window.stateAt(1_400).gear).toBe('gallop');
   });
 
   it('forced collected wins over every gear: the schoolmaster, the autopilot, a wide turn until the fence is cleared; the presses count again once it ends', () => {
     const school = new ApproachWindow({ heightClass: 70, rules: schoolmaster });
     school.setGear('gallop', 0);
-    school.requestGear('extended', 100);
+    school.sent(1, { gear: 'extended' }, 100);
     expect(school.stateAt(200).gear).toBe('collected');
     const window = new ApproachWindow(context70);
     window.setGear('extended', 0);
-    window.requestGear('gallop', 100);
+    window.sent(1, { gear: 'gallop' }, 100);
     window.setAutopilot(true);
     expect(window.stateAt(200).gear).toBe('collected');
     window.setAutopilot(false);
@@ -181,7 +184,7 @@ describe("ApproachWindow — the rider's own pace presses (K1.1 code audit r1, f
     window.clearedFence();
     expect(window.stateAt(200)).toMatchObject({ gear: 'gallop', recentHardTurn: false });
     window.wideTurn();
-    window.controlRegained(); // the sync names no wide turn: none is assumed
+    window.synced(null); // the sync names no wide turn: none is assumed
     expect(window.stateAt(200).gear).toBe('gallop');
   });
 });
