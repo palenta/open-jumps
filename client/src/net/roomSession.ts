@@ -311,12 +311,10 @@ function toSnapshot(state: unknown): LobbyStateSnapshot | null {
   };
 }
 
-/**
- * K1.1 contract stage: the approach speed is not decoded yet — every approach reads as one without speed (what a K1
- * client did); the code stage decodes speedMps as the class comment says, for 'approach-sync' and for the 'approach'
- * round event (handed on as sent until then).
- */
-const K1_NO_SPEED = null;
+/** An approach speed as sent (K1.1 step 5): a finite number above 0, or null — an approach without speed. */
+function speedOf(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : null;
+}
 
 /** A wire message into its ServerMessage shape; unknown types are dropped. */
 function decode(type: string, payload: unknown): ServerMessage | null {
@@ -336,8 +334,12 @@ function decode(type: string, payload: unknown): ServerMessage | null {
         startedAt: typeof p.startedAt === 'number' ? p.startedAt : 0,
         endsAt: typeof p.endsAt === 'number' ? p.endsAt : null,
       };
-    case 'round-event':
-      return { type, event: payload as Extract<ServerMessage, { type: 'round-event' }>['event'] };
+    case 'round-event': {
+      const event = payload as Extract<ServerMessage, { type: 'round-event' }>['event'];
+      if (p.type !== 'approach') return { type, event };
+      // An invalid speed never drops the approach: it still arms the tap, only without speed.
+      return { type, event: { ...(event as Extract<typeof event, { type: 'approach' }>), speedMps: speedOf(p.speedMps) } };
+    }
     case 'approach-sync': {
       const approach = (p.approach ?? null) as Record<string, unknown> | null;
       const valid = approach !== null && typeof approach.fence === 'number' && typeof approach.attempt === 'number' && typeof approach.t0 === 'number';
@@ -350,7 +352,7 @@ function decode(type: string, payload: unknown): ServerMessage | null {
         approach:
           approach === null
             ? null
-            : { fence: approach.fence as number, attempt: approach.attempt as number, t0: approach.t0 as number, speedMps: K1_NO_SPEED },
+            : { fence: approach.fence as number, attempt: approach.attempt as number, t0: approach.t0 as number, speedMps: speedOf(approach.speedMps) },
       };
     }
     case 'class-table':

@@ -152,16 +152,6 @@ interface OpenTurn {
 const MS = 1000;
 
 /**
- * The approach speed as the messages carry it (K1.1 step 5): Approach.speed. K1.1 contract stage — not sent yet:
- * NaN marks the missing value (a client reads a speed that is not a finite positive number as an approach without
- * speed, which is how every K1 client already behaves); the code stage sends approach.speed here.
- */
-function wireSpeed(approach: Approach): number {
-  void approach;
-  return Number.NaN;
-}
-
-/**
  * Timing model (all times in server ms):
  * - Running: position += speed(gear) × dt per tick. Entering the approach zone (position ≥ fence − 12 m) fixes
  *   t0 = now + (fence − position) / speed and opens the attempt judge; the speed stays frozen until the decision.
@@ -271,7 +261,7 @@ export class CourseRunner {
   undecidedApproach(): { fence: number; attempt: number; t0: number; speedMps: number } | null {
     const approach = this.approach;
     if (!approach || approach.applied || approach.judge.decision.decided) return null;
-    return { fence: approach.fence.number, attempt: approach.attempt, t0: approach.t0, speedMps: wireSpeed(approach) };
+    return { fence: approach.fence.number, attempt: approach.attempt, t0: approach.t0, speedMps: approach.speed };
   }
 
   /** The approach state as of `time` (change log rewind), or null when no approach is open at that time. */
@@ -581,7 +571,7 @@ export class CourseRunner {
     this.approach = approach;
     this.lastJudge = approach.judge;
     this.phase = 'approach';
-    events.push({ type: 'approach', fence: fence.number, attempt, t0, speedMps: wireSpeed(approach) });
+    events.push({ type: 'approach', fence: fence.number, attempt, t0, speedMps: approach.speed });
   }
 
   private applyTakeoff(approach: Approach, offsetMs: number | null, decidedAt: number, events: RunnerEvent[]): void {
