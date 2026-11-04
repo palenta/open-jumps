@@ -3,7 +3,7 @@
 // (performance.now(), the one clock every clientTime is read from), the Three.js arena, and a render loop.
 import { ColyseusSDK } from '@colyseus/sdk';
 import { DEFAULT_LOCALE, isLocale, type Locale } from '@open-jumps/shared';
-import { createGame } from './app/game.js';
+import { createGame, debugRequested } from './app/game.js';
 import { GameApi } from './net/api.js';
 import { ClientClock } from './net/clientClock.js';
 import { RoomSession } from './net/roomSession.js';
@@ -36,6 +36,8 @@ function start(): void {
     clock,
     scene: createArenaScene(),
     locale: savedLocale(),
+    // The debug overlay only when the address asks for it ("/?debug", K1.1 step 9).
+    debug: debugRequested(location.search),
   });
   const observer = new MutationObserver(() => {
     try {

@@ -16,7 +16,7 @@ import {
   type Locale,
 } from '@open-jumps/shared';
 import { heatResultsModel, hudModel, namesFrom, resultsModel, riderOnPony, type HudNames } from '../hud/viewModel.js';
-import { InputController } from '../input/controller.js';
+import { InputController, type PressOutcome } from '../input/controller.js';
 import { hitTest, layoutFor, needsRotation, type Control, type Layout } from '../input/layout.js';
 import { LobbyFlow, type LobbyPhase } from '../lobby/lobbyFlow.js';
 import { lobbyModel } from '../lobby/lobbyModel.js';
@@ -24,12 +24,12 @@ import type { GameApi } from '../net/api.js';
 import type { ClientClock } from '../net/clientClock.js';
 import type { RoomSession, SessionEnd } from '../net/roomSession.js';
 import type { ClassTableWire, ClientRoomMessage, LobbyStateSnapshot, LobbyView, PublicProfile, RoundEventWire, ServerMessage } from '../net/types.js';
-import { NotImplementedError } from '../errors.js';
 import { InstantHint } from '../round/hint.js';
 import { chaseCamera, type CameraPose } from '../scene/camera.js';
-import type { TakeoffMarker } from '../scene/takeoffMarker.js';
+import { markerHalfLengths, markerState, type TakeoffMarker } from '../scene/takeoffMarker.js';
 import { RemoteInterpolator, RoundClockEstimate } from '../scene/interpolation.js';
-import { buildTrack, pointAt, type Track, type TrackPoint } from '../scene/track.js';
+import { buildTrack, pointAt, TRACK, type Track, type TrackPoint } from '../scene/track.js';
+import { walkMap } from '../walk/walkMap.js';
 import { walkFocus, walkModel } from '../walk/walkModel.js';
 import { screenFor, type Screen } from './screens.js';
 
@@ -139,6 +139,30 @@ export interface Game {
 
 const CONTROLS: Control[] = ['turn-left', 'turn-right', 'gear', 'tap'];
 
+/** The press feedback of the round screen (K1.1 step 3): the flash of a touched zone, the note of an ignored touch, the toast. */
+const FEEDBACK = { pressedMs: 150, noteMs: 1_200, toastMs: 1_000 } as const;
+
+/** The outcomes of an ignored touch the press note explains; 'not-riding' and 'no-control' say nothing. */
+const NOTED_OUTCOMES: ReadonlySet<PressOutcome> = new Set<PressOutcome>(['not-armed', 'already-tapped', 'cannot-send', 'too-old']);
+
+/** The debug overlay (K1.1 step 9): the presses it lists, the largest gap that confirms the local estimate, the FPS span. */
+const DEBUG = { rows: 5, acceptMs: 20, fpsSpanMs: 1_000 } as const;
+
+/** One touch of a zone as the debug overlay lists it. */
+interface DebugPress {
+  zone: Control;
+  timeStamp: number;
+  source: PressTimeSource;
+  reason: PressTimeReason;
+  clientTime: number;
+  handledAt: number;
+  outcome: PressOutcome;
+  /** A tap that went out: its class and heat, fence and attempt, the local offset at the press and the judge's word. */
+  tap: { key: string; fence: number; attempt: number; localOffset: number | null; judge: 'pending' | 'accepted' | 'unconfirmed' | 'no-tap'; judgeOffset: number | null } | null;
+  /** A turn that went out: its class and heat, and the quality of the own verdict ('' until it arrives). */
+  turn: { key: string; quality: string } | null;
+}
+
 /** Where the moment of a press came from: the event's own timeStamp, or the clock at handling instead of it. */
 export type PressTimeSource = 'event' | 'fallback';
 
@@ -171,17 +195,8 @@ export interface PressTime {
  * of the moment and, for a fallback, the reason (PressTime); the rule that chooses the moment is unchanged by K1.1.
  */
 export function pressTime(timeStamp: number, now: number): PressTime {
-  const time = !Number.isFinite(timeStamp) || timeStamp <= 0 || timeStamp > now ? now : timeStamp;
-  // K1.1 contract stage: the moment is chosen by the K1 rule above; source and reason are not built yet.
-  return {
-    time,
-    get source(): never {
-      throw new NotImplementedError('pressTime().source (K1.1 step 2)');
-    },
-    get reason(): never {
-      throw new NotImplementedError('pressTime().reason (K1.1 step 2)');
-    },
-  };
+  const reason: PressTimeReason = !Number.isFinite(timeStamp) ? 'not-finite' : timeStamp <= 0 ? 'non-positive' : timeStamp > now ? 'later-than-now' : null;
+  return reason === null ? { time: timeStamp, source: 'event', reason } : { time: now, source: 'fallback', reason };
 }
 
 /**
@@ -190,8 +205,7 @@ export function pressTime(timeStamp: number, now: number): PressTime {
  * parameter that only contains the word ("?debugger", "?nodebug") included.
  */
 export function debugRequested(search: string): boolean {
-  void search;
-  throw new NotImplementedError('debugRequested (K1.1 step 9)');
+  return new URLSearchParams(search).has('debug');
 }
 
 /** Everything the client keeps for one class: re-created at every class-course, so a new class starts clean. */
@@ -206,9 +220,23 @@ interface RoundModules {
   /**
    * The own horse's open approach with its take-off moment in SERVER ms, for the armed tap control: translated into
    * device time whenever the control is drawn, so an approach heard before the clock was measured lights up once it
-   * is (audit K1 r2 #3).
+   * is (audit K1 r2 #3). speedMps is its frozen speed (K1.1 step 5; null: without speed), for the take-off marker
+   * and the forecast of the own horse (step 7).
    */
-  armed: { fence: number; attempt: number; t0: number } | null;
+  armed: { fence: number; attempt: number; t0: number; speedMps: number | null } | null;
+  /**
+   * After the own 'takeoff' verdict: the position the own horse is held at until the first patch after the event
+   * (K1.1 step 7, OwnHorseMode 'hold'), and whether the fence was cleared (then a fresh patch behind it holds on).
+   */
+  hold: { positionM: number; cleared: boolean } | null;
+  /** The direction button of the own turn that went out, until the own 'turn' verdict (data-chosen). */
+  chosen: Control | null;
+  /** The schoolmaster assist frozen for this class (the debug overlay's matching: an automatic take-off is not her tap). */
+  schoolmaster: boolean;
+  /** The own 'autopilot' event's last word (the debug overlay's matching, together with the state's autopilot). */
+  autopilot: boolean;
+  /** The class and heat (roundKey) of the latest state: a new heat drops the own approach, the hold and the choice. */
+  heatKey: string | null;
   /** The last captioned event and whose horse it was (re-rendered in the locale of the moment). */
   caption: { event: CaptionEvent; riderId: string } | null;
   /**
@@ -386,8 +414,6 @@ interface RoundModules {
  *   state carries none), others read as 'yegua'.
  */
 export function createGame(deps: GameDeps): Game {
-  // K1.1 contract stage: the debug overlay of step 9 is not built yet; a game asked for it says so at once.
-  if (deps.debug === true) throw new NotImplementedError('the debug overlay (K1.1 step 9)');
   const doc = deps.document;
   const root = deps.root;
   const measure = deps.measure ?? ((element: HTMLElement): ArenaRect => element.getBoundingClientRect());
@@ -437,6 +463,29 @@ export function createGame(deps: GameDeps): Game {
   rotate.className = 'rotate';
   rotate.setAttribute('hidden', '');
   arena.appendChild(rotate);
+
+  // The press feedback (K1.1 step 3): the flash timers per control, the note and the toast with their timers.
+  const pressedTimers = new Map<Control, unknown>();
+  let note: { key: string; timer: unknown } | null = null;
+  let toast: { key: string; timer: unknown } | null = null;
+
+  // The debug overlay (K1.1 step 9) lives once, like the arena: every render puts it back on top of the screen.
+  const debugPanel = deps.debug === true ? doc.createElement('div') : null;
+  const debugList = doc.createElement('ol');
+  const debugStats = doc.createElement('div');
+  let debugPresses: DebugPress[] = [];
+  const frameTimes: number[] = [];
+  if (debugPanel) {
+    debugPanel.dataset.debug = '';
+    debugPanel.className = 'debug';
+    debugPanel.style.pointerEvents = 'none';
+    debugList.className = 'debug-presses';
+    debugStats.dataset.debugStats = '';
+    debugStats.dataset.fps = '0';
+    debugStats.dataset.calls = '';
+    debugStats.textContent = 'FPS 0 · draw calls n/a';
+    debugPanel.append(debugList, debugStats);
+  }
 
   // ---- helpers ------------------------------------------------------------------------------------------------
 
@@ -490,6 +539,11 @@ export function createGame(deps: GameDeps): Game {
       interpolator: new RemoteInterpolator(),
       roundClock: new RoundClockEstimate(),
       armed: null,
+      hold: null,
+      chosen: null,
+      schoolmaster: assists.schoolmaster,
+      autopilot: false,
+      heatKey: null,
       caption: null,
       walk: null,
       requestedLine: 'center',
@@ -524,6 +578,20 @@ export function createGame(deps: GameDeps): Game {
   function onRoundState(current: LobbyStateSnapshot): void {
     if (!round || me === null) return;
     const own = current.riders[me.id];
+    // A new heat starts without the last heat's approach, hold or chosen turn (the controller drops its own approach too).
+    const key = roundKey();
+    if (round.heatKey !== null && round.heatKey !== key) {
+      round.armed = null;
+      round.hold = null;
+      round.chosen = null;
+      round.autopilot = false;
+    }
+    round.heatKey = key;
+    // The first patch after the own verdict ends the hold — for a cleared fence only once it is not behind the held
+    // position (the horse never goes back); for a refusal, a run-out or a fall its fence − 2 m is the server's step
+    // back. A rider no longer riding is drawn from the patch.
+    const hold = round.hold;
+    if (hold !== null && (own === undefined || own.status !== 'riding' || !hold.cleared || own.positionM >= hold.positionM)) round.hold = null;
     round.controller.update({
       riding: current.phase === 'riding' && own !== undefined && own.status === 'riding',
       round: roundKey(),
@@ -549,14 +617,20 @@ export function createGame(deps: GameDeps): Game {
         if (own) {
           round.hint.approach(event);
           round.controller.approach(event);
-          round.armed = { fence: event.fence, attempt: event.attempt, t0: event.t0 };
+          round.armed = { fence: event.fence, attempt: event.attempt, t0: event.t0, speedMps: event.speedMps };
+          round.hold = null;
         }
         break;
       case 'takeoff':
         if (own) {
+          // The position drawn up to the verdict is held until a patch from after it: the server sends a tick's
+          // events before the state of the same tick, so the patch at hand is stale.
+          const visible = ownPosition(deps.clock.now());
           round.hint.verdict(event);
           round.controller.approachClosed();
           round.armed = null;
+          round.hold = visible === null ? null : { positionM: visible.positionM, cleared: event.outcome.cleared };
+          judgeDebugTap(event);
         }
         round.caption = { event: { type: 'takeoff', label: event.outcome.label, fence: event.fence }, riderId: event.riderId };
         break;
@@ -569,6 +643,8 @@ export function createGame(deps: GameDeps): Game {
         if (own) {
           round.controller.turnTaken();
           round.hint.setHardTurn(event.outcome.hardTurn);
+          round.chosen = null;
+          qualifyDebugTurn(event.outcome.quality);
         }
         round.caption = { event: { type: 'turn', label: event.outcome.label }, riderId: event.riderId };
         break;
@@ -582,6 +658,7 @@ export function createGame(deps: GameDeps): Game {
         round.caption = { event: { type: 'eliminated', reason: event.reason }, riderId: event.riderId };
         break;
       case 'autopilot':
+        if (own) round.autopilot = event.on;
         round.caption = { event: { type: 'autopilot', on: event.on }, riderId: event.riderId };
         break;
       case 'waiting':
@@ -601,7 +678,53 @@ export function createGame(deps: GameDeps): Game {
     const approach = message.approach;
     round.controller.sync(`${String(message.classNumber)}#${String(message.heatIndex)}`, approach);
     round.hint.sync({ hardTurn: message.hardTurn, approach });
-    round.armed = approach === null ? null : { fence: approach.fence, attempt: approach.attempt, t0: approach.t0 };
+    round.armed = approach === null ? null : { fence: approach.fence, attempt: approach.attempt, t0: approach.t0, speedMps: approach.speedMps };
+    // Taking control back: the approach open now is forecast afresh, and no hold survives a sync without one.
+    round.hold = null;
+  }
+
+  // ---- the own horse and its take-off marker (K1.1 step 7) ---------------------------------------------------
+
+  /**
+   * The own horse's visible position at device time `now` and how it was chosen (OwnHorseMode); null when the own
+   * horse is not in the state. The forecast is the server's own run of the open approach: fence − speedMps ×
+   * (t0 − toServer(now)), at the take-off point from t0 on, and never behind the latest patch.
+   */
+  function ownPosition(now: number): { positionM: number; mode: OwnHorseMode } | null {
+    const current = state();
+    if (!round || me === null || current === null) return null;
+    const own = current.riders[me.id];
+    if (own === undefined) return null;
+    if (round.hold !== null) return { positionM: round.hold.positionM, mode: 'hold' };
+    const armed = round.armed;
+    const serverNow = deps.clock.toServer(now);
+    const fence = armed === null ? undefined : round.course.fences.find((f) => f.number === armed.fence);
+    if (armed !== null && armed.speedMps !== null && serverNow !== null && fence !== undefined && own.status === 'riding') {
+      const forecast = serverNow >= armed.t0 ? fence.distanceM : fence.distanceM - (armed.speedMps * (armed.t0 - serverNow)) / 1000;
+      return { positionM: Math.max(Math.min(forecast, fence.distanceM), own.positionM), mode: 'forecast' };
+    }
+    return { positionM: own.positionM, mode: 'patch' };
+  }
+
+  /**
+   * The own open approach's take-off marker at device time `now`: at the fence's take-off point, its band from the
+   * very window the instant hint judges with (round.hint.approachWindow) at the frozen speed, its state by the
+   * server's time of `now` against t0. Null without an own open approach.
+   */
+  function takeoffMarker(now: number): TakeoffMarker | null {
+    const armed = round?.armed ?? null;
+    if (!round || armed === null) return null;
+    const fence = round.course.fences.find((f) => f.number === armed.fence);
+    if (fence === undefined) return null;
+    const window = round.hint.approachWindow.windowAt(now);
+    const halves = markerHalfLengths(window, armed.speedMps);
+    return {
+      fence: fence.number,
+      distanceM: fence.distanceM,
+      state: markerState(deps.clock.toServer(now), armed.t0, window, armed.speedMps),
+      cleanHalfM: halves?.cleanHalfM ?? null,
+      perfectHalfM: halves?.perfectHalfM ?? null,
+    };
   }
 
   // ---- the session ------------------------------------------------------------------------------------------
@@ -813,7 +936,8 @@ export function createGame(deps: GameDeps): Game {
       const element = controlElements.get(control);
       if (!element) continue;
       const zone = layout?.zones[control];
-      if (!zone || portrait) {
+      // The controls belong to the round screen alone: the walk (K1.1 step 3) shows the arena without them.
+      if (!zone || portrait || renderedScreen !== 'round') {
         element.style.display = 'none';
         continue;
       }
@@ -843,13 +967,145 @@ export function createGame(deps: GameDeps): Game {
     // and the instant hint all read the event's own time; a tap or a turn already too old for the judge when it is
     // handled is not sent, spends nothing and shows no hint (audit K1 r4 #1).
     const handledAt = deps.clock.now();
-    const at = pressTime(event.timeStamp, handledAt).time;
-    const sent = round.controller.press(control, at, handledAt).message;
+    const moment = pressTime(event.timeStamp, handledAt);
+    const at = moment.time;
+    const armedT0 = round.armed?.t0 ?? null;
+    const { message: sent, outcome } = round.controller.press(control, at, handledAt);
     if (sent?.type === 'tap') {
       const hint = round.hint.tap(at);
       if (hint) round.caption = { event: { type: 'takeoff', label: hint.outcome.label, fence: hint.fence }, riderId: me?.id ?? '' };
     }
+    // What the touch shows is drawn from the controller's own answer (K1.1 step 3), never from a second set of rules.
+    flash(control, outcome === 'sent' ? 'sent' : 'ignored');
+    if (control !== 'gear' && NOTED_OUTCOMES.has(outcome)) note = showFor(note, `hud.pressNote.${outcome}`, FEEDBACK.noteMs, () => (note = null));
+    if (sent?.type === 'gear') toast = showFor(toast, `hud.toast.gear.${sent.gear}`, FEEDBACK.toastMs, () => (toast = null));
+    if (sent?.type === 'line') toast = showFor(toast, `hud.toast.line.${sent.line}`, FEEDBACK.toastMs, () => (toast = null));
+    if (sent?.type === 'turn') round.chosen = control;
+    if (debugPanel) {
+      const key = roundKey();
+      const t0AtDevice = armedT0 === null ? null : deps.clock.toClient(armedT0);
+      recordDebugPress({
+        zone: control,
+        timeStamp: event.timeStamp,
+        source: moment.source,
+        reason: moment.reason,
+        clientTime: at,
+        handledAt,
+        outcome,
+        tap: sent?.type === 'tap' ? { key, fence: sent.fence, attempt: sent.attempt, localOffset: t0AtDevice === null ? null : at - t0AtDevice, judge: 'pending', judgeOffset: null } : null,
+        turn: sent?.type === 'turn' ? { key, quality: '' } : null,
+      });
+    }
     updateHud();
+  }
+
+  // ---- the press feedback (K1.1 step 3) ----------------------------------------------------------------------
+
+  /** A touched zone flashes for FEEDBACK.pressedMs: 'sent' or 'ignored'; a new touch of the same control restarts it. */
+  function flash(control: Control, kind: 'sent' | 'ignored'): void {
+    const element = controlElements.get(control);
+    if (!element) return;
+    const running = pressedTimers.get(control);
+    if (running !== undefined) timers.clearTimeout(running);
+    element.setAttribute('data-pressed', kind);
+    pressedTimers.set(
+      control,
+      timers.setTimeout(() => {
+        pressedTimers.delete(control);
+        element.removeAttribute('data-pressed');
+      }, FEEDBACK.pressedMs),
+    );
+  }
+
+  /** A message of the HUD (a note or a toast) shown for `ms`: it replaces the one shown and restarts the time. */
+  function showFor(shown: { key: string; timer: unknown } | null, key: string, ms: number, expire: () => void): { key: string; timer: unknown } {
+    if (shown !== null) timers.clearTimeout(shown.timer);
+    const timer = timers.setTimeout(() => {
+      expire();
+      updateHud();
+    }, ms);
+    return { key, timer };
+  }
+
+  // ---- the debug overlay (K1.1 step 9) -----------------------------------------------------------------------
+
+  function recordDebugPress(press: DebugPress): void {
+    debugPresses = [press, ...debugPresses].slice(0, DEBUG.rows);
+    renderDebugRows();
+  }
+
+  /**
+   * The own 'takeoff' verdict against the tap rows of the current class and heat with its fence and attempt: 'no-tap'
+   * when the judge saw none; 'accepted' when its offset is within DEBUG.acceptMs of the local estimate and neither the
+   * schoolmaster nor the autopilot rode the horse; 'unconfirmed' otherwise.
+   */
+  function judgeDebugTap(event: Extract<RoundEventWire, { type: 'takeoff' }>): void {
+    if (!debugPanel || !round || me === null) return;
+    const key = roundKey();
+    const automatic = round.schoolmaster || round.autopilot || state()?.riders[me.id]?.autopilot === true;
+    for (const press of debugPresses) {
+      const tap = press.tap;
+      if (tap === null || tap.judge !== 'pending' || tap.key !== key || tap.fence !== event.fence || tap.attempt !== event.attempt) continue;
+      tap.judgeOffset = event.offsetMs;
+      if (event.offsetMs === null) tap.judge = 'no-tap';
+      else tap.judge = !automatic && tap.localOffset !== null && Math.abs(event.offsetMs - tap.localOffset) <= DEBUG.acceptMs ? 'accepted' : 'unconfirmed';
+    }
+    renderDebugRows();
+  }
+
+  /** The own 'turn' verdict names the quality of the latest turn that went out in this class and heat. */
+  function qualifyDebugTurn(quality: string): void {
+    if (!debugPanel) return;
+    const key = roundKey();
+    const pending = debugPresses.find((press) => press.turn !== null && press.turn.key === key && press.turn.quality === '');
+    if (pending?.turn) pending.turn.quality = quality;
+    renderDebugRows();
+  }
+
+  /** The rows as data attributes and as the English text the owner reads on the phone (offsets in whole ms). */
+  function renderDebugRows(): void {
+    if (!debugPanel) return;
+    const rows = debugPresses.map((press) => {
+      const row = doc.createElement('li');
+      row.setAttribute('data-debug-press', '');
+      row.setAttribute('data-zone', press.zone);
+      row.setAttribute('data-time-stamp', String(press.timeStamp));
+      row.setAttribute('data-source', press.source);
+      row.setAttribute('data-reason', press.reason ?? '');
+      row.setAttribute('data-client-time', String(press.clientTime));
+      row.setAttribute('data-handled-at', String(press.handledAt));
+      row.setAttribute('data-outcome', press.outcome);
+      const words: string[] = [press.zone, press.outcome];
+      if (press.source === 'fallback') words.push(`fallback ${press.reason ?? ''}`);
+      words.push(`delay ${String(Math.round(press.handledAt - press.clientTime))} ms`);
+      const tap = press.tap;
+      if (tap !== null) {
+        row.setAttribute('data-local-offset', tap.localOffset === null ? '' : String(tap.localOffset));
+        row.setAttribute('data-judge', tap.judge);
+        row.setAttribute('data-judge-offset', tap.judgeOffset === null ? '' : String(tap.judgeOffset));
+        if (tap.localOffset !== null) words.push(`local ${String(Math.round(tap.localOffset))} ms`);
+        if (tap.judgeOffset !== null) words.push(`judge ${String(Math.round(tap.judgeOffset))} ms`);
+        words.push(tap.judge);
+      }
+      if (press.turn !== null) {
+        row.setAttribute('data-turn-quality', press.turn.quality);
+        if (press.turn.quality !== '') words.push(press.turn.quality);
+      }
+      row.textContent = words.join(' · ');
+      return row;
+    });
+    debugList.replaceChildren(...rows);
+  }
+
+  /** The line under the rows: the frames of the last second up to `now` and the draw calls of the frame just drawn. */
+  function renderDebugStats(now: number): void {
+    if (!debugPanel) return;
+    frameTimes.push(now);
+    while (frameTimes.length > 0 && (frameTimes[0] ?? now) <= now - DEBUG.fpsSpanMs) frameTimes.shift();
+    const calls = deps.scene.drawCalls();
+    debugStats.dataset.fps = String(frameTimes.length);
+    debugStats.dataset.calls = calls === null ? '' : String(calls);
+    debugStats.textContent = `FPS ${String(frameTimes.length)} · draw calls ${calls === null ? 'n/a' : String(calls)}`;
   }
 
   // ---- rendering -----------------------------------------------------------------------------------------------
@@ -969,6 +1225,7 @@ export function createGame(deps: GameDeps): Game {
     const walk = walkModel(round.course, heightClass, locale);
     const focus = focusAt(deps.clock.now());
     return `<section class="screen walk">
+      <div class="arena-slot"></div>
       <div class="walk-panel">
         <h1>${escapeHtml(walk.title)}</h1>
         <p>${escapeHtml(walk.timeText)}</p>
@@ -976,8 +1233,47 @@ export function createGame(deps: GameDeps): Game {
         <p class="focus"><span data-focus>${String(focus)}</span></p>
         ${localeButtons()}
       </div>
-      <div class="arena-slot"></div>
+      <div class="walk-map-panel">${renderWalkMap(round, focus)}</div>
     </section>`;
+  }
+
+  /**
+   * The map of the route (K1.1 step 4): walkMap(course) as an SVG — the track, a bar across it with its number at
+   * every fence (the focused one marked), an arrow along the way out of every turn, the start and the finish.
+   */
+  function renderWalkMap(current: RoundModules, focus: number): string {
+    const map = walkMap(current.course);
+    const { width, height } = map.box;
+    const f = (value: number): string => value.toFixed(1);
+    const route = map.path.map((p) => `${f(p.x)},${f(p.y)}`).join(' ');
+    const fences = map.fences
+      .map((fence) => {
+        // The bar lies across the track; the number sits beside it, on the bar's line.
+        const across = { x: -Math.sin(fence.heading), y: Math.cos(fence.heading) };
+        const bar = 9;
+        const label = { x: fence.at.x + across.x * 18, y: fence.at.y + across.y * 18 };
+        return `<g class="walk-fence" data-fence-marker="${String(fence.number)}"${fence.number === focus ? ' data-focus="true"' : ''}>
+          <line x1="${f(fence.at.x - across.x * bar)}" y1="${f(fence.at.y - across.y * bar)}" x2="${f(fence.at.x + across.x * bar)}" y2="${f(fence.at.y + across.y * bar)}" />
+          <text x="${f(label.x)}" y="${f(label.y)}">${String(fence.number)}</text>
+        </g>`;
+      })
+      .join('');
+    const turns = map.turns
+      .map((turn) => {
+        // The arrowhead points the way the horse leaves the turn: the heading where the turn's arc ends.
+        const out = pointAt(current.track, turn.distanceM + (TRACK.turnRadiusM * TRACK.turnAngleRad) / 2).heading;
+        const tip = { x: turn.at.x + Math.cos(out) * 10, y: turn.at.y + Math.sin(out) * 10 };
+        const side = { x: -Math.sin(out) * 7, y: Math.cos(out) * 7 };
+        const back = { x: turn.at.x - Math.cos(out) * 4, y: turn.at.y - Math.sin(out) * 4 };
+        return `<polygon class="walk-turn" data-turn-marker="${turn.direction}" points="${f(tip.x)},${f(tip.y)} ${f(back.x + side.x)},${f(back.y + side.y)} ${f(back.x - side.x)},${f(back.y - side.y)}" />`;
+      })
+      .join('');
+    const end = (point: { x: number; y: number }, kind: 'start' | 'finish'): string =>
+      `<g class="walk-${kind}" data-walk-${kind}><circle cx="${f(point.x)}" cy="${f(point.y)}" r="5" /><text x="${f(point.x)}" y="${f(point.y - 9)}">${escapeHtml(t(kind === 'start' ? 'walk.map.start' : 'walk.map.finish'))}</text></g>`;
+    return `<svg data-walk-map class="walk-map" viewBox="0 0 ${String(width)} ${String(height)}" preserveAspectRatio="xMidYMid meet" role="img" aria-label="${escapeHtml(t('walk.map.label'))}">
+      <polyline class="walk-route" points="${route}" />
+      ${turns}${fences}${end(map.start, 'start')}${end(map.finish, 'finish')}
+    </svg>`;
   }
 
   function renderRound(): string {
@@ -986,6 +1282,8 @@ export function createGame(deps: GameDeps): Game {
       <div class="hud">
         <div class="hud-top"><span data-hud-fence></span><span data-hud-faults></span><span data-hud-time></span></div>
         <div class="hud-bottom"><span data-hud-gear></span><span data-hud-caption></span><span data-hud-phase></span></div>
+        <div data-press-note class="press-note" hidden></div>
+        <div data-toast class="toast" hidden></div>
         <div data-badge class="badge">${escapeHtml(t('app.placeholderArt'))}</div>
       </div>
     </section>`;
@@ -1060,6 +1358,7 @@ export function createGame(deps: GameDeps): Game {
       slot.appendChild(arena);
       measureArena();
     }
+    if (debugPanel) root.appendChild(debugPanel);
     updateHud();
   }
 
@@ -1067,8 +1366,15 @@ export function createGame(deps: GameDeps): Game {
     if (destroyed) return;
     const current = state();
     if (renderedScreen === 'walk') {
-      const focus = root.querySelector('[data-focus]');
-      if (focus && round) focus.textContent = String(focusAt(deps.clock.now()));
+      if (!round) return;
+      const focused = focusAt(deps.clock.now());
+      const focus = root.querySelector('[data-focus]:not([data-fence-marker])');
+      if (focus) focus.textContent = String(focused);
+      // Exactly one marker of the map carries the fly-over's focus.
+      for (const marker of root.querySelectorAll('[data-walk-map] [data-fence-marker]')) {
+        if (marker.getAttribute('data-fence-marker') === String(focused)) marker.setAttribute('data-focus', 'true');
+        else marker.removeAttribute('data-focus');
+      }
       return;
     }
     if (renderedScreen !== 'round' || !current || !me) return;
@@ -1103,6 +1409,26 @@ export function createGame(deps: GameDeps): Game {
         tap.removeAttribute('data-takeoff-at');
       }
     }
+    // The own turn window lights both direction buttons alike (no hint of the way); the button of a turn that went
+    // out stays chosen until the verdict (K1.1 step 3). Both read the controller, never a copy of its window.
+    const windowOpen = round?.controller.turnWindowOpen(deps.clock.now()) ?? false;
+    for (const control of ['turn-left', 'turn-right'] as const) {
+      const element = controlElements.get(control);
+      if (!element) continue;
+      if (windowOpen) element.setAttribute('data-window', 'open');
+      else element.removeAttribute('data-window');
+      if (round?.chosen === control) element.setAttribute('data-chosen', 'true');
+      else element.removeAttribute('data-chosen');
+    }
+    const message = (selector: string, key: string | null): void => {
+      const element = root.querySelector(selector);
+      if (!element) return;
+      element.textContent = key === null ? '' : translateKey(locale, key);
+      if (key === null) element.setAttribute('hidden', '');
+      else element.removeAttribute('hidden');
+    };
+    message('[data-press-note]', note?.key ?? null);
+    message('[data-toast]', toast?.key ?? null);
   }
 
   // ---- DOM events --------------------------------------------------------------------------------------------
@@ -1271,6 +1597,11 @@ export function createGame(deps: GameDeps): Game {
 
   function frame(now: number): void {
     if (destroyed) return;
+    drawFrame(now);
+    renderDebugStats(now);
+  }
+
+  function drawFrame(now: number): void {
     const current = state();
     const currentScreen = screen();
     if (currentScreen === 'walk' && round) {
@@ -1281,25 +1612,25 @@ export function createGame(deps: GameDeps): Game {
     if (currentScreen === 'round' && round && current && me) {
       updateHud();
       const renderTime = round.roundClock.estimate(now) ?? current.roundClockMs;
+      // One visible position of the own horse (K1.1 step 7): the camera follows the very point drawn.
+      const own = ownPosition(now);
       const riders: SceneFrame['riders'] = [];
       let ownPoint: TrackPoint | null = null;
       for (const [id, rider] of Object.entries(current.riders)) {
         const isOwn = id === me.id;
-        const position = isOwn ? rider.positionM : (round.interpolator.positionAt(id, renderTime) ?? rider.positionM);
+        const position = isOwn ? (own?.positionM ?? rider.positionM) : (round.interpolator.positionAt(id, renderTime) ?? rider.positionM);
         const point = pointAt(round.track, position);
         if (isOwn) ownPoint = point;
         riders.push({ id, point, isOwn, label: riderOnPony(locale, names(), id) });
       }
       const camera = ownPoint ?? riders[0]?.point ?? null;
-      // K1.1 contract stage: the own horse is drawn from the patch as in K1 and no take-off marker is drawn yet; the
-      // code stage adds the marker and the forecast / hold modes of step 7.
       deps.scene.render({
         phase: 'riding',
         riders,
         camera: camera ? chaseCamera(camera) : null,
         focusFence: null,
-        takeoff: null,
-        ownMode: ownPoint !== null ? 'patch' : null,
+        takeoff: takeoffMarker(now),
+        ownMode: ownPoint !== null ? (own?.mode ?? 'patch') : null,
       });
       return;
     }
@@ -1322,6 +1653,12 @@ export function createGame(deps: GameDeps): Game {
     deps.window.removeEventListener('pageshow', onPageShow);
     deps.window.removeEventListener('resize', onResize);
     flow?.stop();
+    for (const timer of pressedTimers.values()) timers.clearTimeout(timer);
+    pressedTimers.clear();
+    if (note) timers.clearTimeout(note.timer);
+    if (toast) timers.clearTimeout(toast.timer);
+    note = null;
+    toast = null;
     const current = session;
     dropSession();
     if (current) void current.leave();
