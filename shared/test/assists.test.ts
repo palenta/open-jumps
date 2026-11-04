@@ -5,6 +5,7 @@ import {
   WIDER_WINDOW_FACTOR,
   effectiveWindow,
   freezeForRound,
+  gearInForce,
   schoolmasterGear,
   schoolmasterReferenceWindow,
   schoolmasterTapOffset,
@@ -51,6 +52,26 @@ describe('schoolmaster gear', () => {
 
   it('leaves the gear alone between fences', () => {
     expect(schoolmasterGear('gallop', false)).toBe('gallop');
+  });
+});
+
+describe('gearInForce: the one rule of the gear in force, for the server and the client (K1.1 code audit r2)', () => {
+  const free = { schoolmaster: false, autopilot: false, wideTurn: false };
+
+  it('nothing forcing: the gear the rider asked for, whichever it is', () => {
+    for (const gear of ['collected', 'extended', 'gallop'] as const) expect(gearInForce(gear, free)).toBe(gear);
+  });
+
+  it('the schoolmaster, the own autopilot or a wide turn each collect the canter whatever was asked for', () => {
+    for (const forcing of [{ ...free, schoolmaster: true }, { ...free, autopilot: true }, { ...free, wideTurn: true }]) {
+      expect(gearInForce('gallop', forcing)).toBe('collected');
+      expect(gearInForce('extended', forcing)).toBe('collected');
+    }
+  });
+
+  it('negative: the requested gear is not lost under the forcing — once it ends, the same request is in force again', () => {
+    expect(gearInForce('gallop', { ...free, autopilot: true })).toBe('collected');
+    expect(gearInForce('gallop', free)).toBe('gallop');
   });
 });
 

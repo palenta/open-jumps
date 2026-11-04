@@ -8,6 +8,7 @@ import {
   courseTimes,
   createRng,
   decisionDeadline,
+  gearInForce,
   gearSpeedMPerS,
   judgeAttempt,
   judgeTurn,
@@ -17,6 +18,7 @@ import {
   TURN,
   type ApproachState,
   type AttemptDecision,
+  type CanterForcing,
   type CourseSpec,
   type FenceSpec,
   type Gear,
@@ -658,16 +660,25 @@ export class CourseRunner {
     return this.autopilot || this.deps.rules.assists.schoolmaster;
   }
 
-  /** The gear a new approach freezes: collected for schoolmaster/autopilot or after a wide turn, else the gear in force. */
+  /**
+   * The gear a new approach freezes: collected for schoolmaster/autopilot or after a wide turn, else the gear in force.
+   * The rule is the shared gearInForce (the client's take-off window applies the same one, K1.1 code audit r2).
+   */
   private approachGear(time: number): Gear {
-    return this.assistDrives() || this.forcedCollected ? 'collected' : this.controlAt(time).gear;
+    return gearInForce(this.controlAt(time).gear, this.forcing(true));
   }
 
-  /** The gear actually in force at `time`: assists and a wide turn collect the canter regardless of the request. */
+  /**
+   * The gear actually in force at `time`: assists and a wide turn collect the canter regardless of the request; the
+   * schoolmaster only in an approach and in flight (the shared gearInForce, K1.1 code audit r2).
+   */
   private gearInForceAt(time: number): Gear {
-    if (this.autopilot || this.forcedCollected) return 'collected';
-    if (this.deps.rules.assists.schoolmaster && (this.phase === 'approach' || this.phase === 'flight')) return 'collected';
-    return this.controlAt(time).gear;
+    return gearInForce(this.controlAt(time).gear, this.forcing(this.phase === 'approach' || this.phase === 'flight'));
+  }
+
+  /** What collects the canter now; `schoolmasterDrives`: whether the frozen schoolmaster drives where the gear is read. */
+  private forcing(schoolmasterDrives: boolean): CanterForcing {
+    return { schoolmaster: schoolmasterDrives && this.deps.rules.assists.schoolmaster, autopilot: this.autopilot, wideTurn: this.forcedCollected };
   }
 
   private controlAt(time: number): ControlEntry {
@@ -686,9 +697,8 @@ export class CourseRunner {
 
   private approachState(approach: Approach, time: number): ApproachState {
     const control = this.controlAt(time);
-    const gear: Gear = this.assistDrives() || this.forcedCollected ? 'collected' : control.gear;
     return {
-      gear,
+      gear: gearInForce(control.gear, this.forcing(true)),
       heightClass: this.deps.heightClass,
       angleSharp: control.line === 'angle',
       recentHardTurn: approach.recentHardTurn,

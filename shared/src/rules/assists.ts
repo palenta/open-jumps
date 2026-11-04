@@ -40,6 +40,30 @@ export function schoolmasterGear(requested: Gear, approachingFence: boolean): Ge
 }
 
 /**
+ * What collects the canter whatever gear the rider asked for (plan 1.8, 2.3). The server's course runner and the
+ * client's take-off window read the gear in force through gearInForce with these flags, so both sides apply one rule.
+ */
+export interface CanterForcing {
+  /**
+   * The schoolmaster assist frozen for the round, where it drives: always for the judge's approach state and for the
+   * speed a new approach freezes; for the horse's running speed and the state's gear only in an approach and in flight.
+   */
+  schoolmaster: boolean;
+  /** The rider's own autopilot (her connection is gone; plan 2.3). */
+  autopilot: boolean;
+  /** A wide turn, until the fence after it is cleared. */
+  wideTurn: boolean;
+}
+
+/**
+ * The gear in force: collected while anything forces it (CanterForcing), otherwise the gear the rider asked for. The
+ * requested gear is kept underneath: once the forcing ends, it is in force again at once.
+ */
+export function gearInForce(requested: Gear, forcing: Readonly<CanterForcing>): Gear {
+  return forcing.schoolmaster || forcing.autopilot || forcing.wideTurn ? 'collected' : requested;
+}
+
+/**
  * The window schoolmaster aims at: the window of an IDEAL approach at the same height class
  * (collected, straight, no hard turn, no spook, no lead-horse bonus), passed through the same round rules
  * as the real attempt. It is deliberately not the actual narrowed window, so a sharp angle or a spook can
