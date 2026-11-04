@@ -10,8 +10,7 @@
 import * as THREE from 'three';
 import type { CourseSpec } from '@open-jumps/shared';
 import type { SceneFrame, SceneLike } from '../app/game.js';
-import { NotImplementedError } from '../errors.js';
-import type { MarkerState } from './takeoffMarker.js';
+import type { MarkerState, TakeoffMarker } from './takeoffMarker.js';
 import { buildTrack, fencePose, pointAt, type Track } from './track.js';
 
 /** One take-off marker as the arena shows it (for the tests: no WebGL is needed to read it). */
@@ -45,7 +44,19 @@ const COLOURS = {
   own: 0x2e86de,
   others: [0xe17055, 0x6c5ce7, 0x00b894, 0xfdcb6e],
   track: 0xcbb57a,
+  weakMark: 0xfaf3dc,
+  outline: 0xffffff,
+  clean: 0xf4d03f,
+  perfect: 0x2ecc71,
+  late: 0x4a4a4a,
 } as const;
+
+/** The take-off marks lie flat on the track, across it: this wide (the track ribbon is 3 m). */
+const MARK_WIDTH_M = 3.2;
+/** The outline of a band whose length is unknown (an approach without speed): this long along the track. */
+const OUTLINE_LENGTH_M = 1.5;
+/** The outline's strips: this thin. */
+const OUTLINE_STRIP_M = 0.12;
 
 /** The horse placeholder: a box body, a smaller box head, four thin legs, a sprite with the name above. */
 function makeHorse(colour: number): THREE.Group {
@@ -166,6 +177,80 @@ function makeTrackRibbon(track: Track): THREE.Group {
   return group;
 }
 
+/** A flat piece of the ground plane: the unit plane `geometry` laid on the ground, `length` along x and `width` along z. */
+function flat(geometry: THREE.PlaneGeometry, material: THREE.Material, length: number, width: number, y: number): THREE.Mesh {
+  const mesh = new THREE.Mesh(geometry, material);
+  mesh.rotation.x = -Math.PI / 2;
+  mesh.scale.set(length, width, 1);
+  mesh.position.y = y;
+  return mesh;
+}
+
+/** The weak mark of every fence: a thin pale stripe across the track at its take-off point (one geometry, one material). */
+function makeWeakMarks(track: Track, course: CourseSpec): THREE.Group {
+  const group = new THREE.Group();
+  const geometry = new THREE.PlaneGeometry(1, 1);
+  const material = new THREE.MeshBasicMaterial({ color: COLOURS.weakMark, transparent: true, opacity: 0.55 });
+  for (const fence of course.fences) {
+    const point = pointAt(track, fence.distanceM);
+    const holder = new THREE.Group();
+    holder.position.set(point.x, 0, point.z);
+    holder.rotation.y = -point.heading;
+    holder.add(flat(geometry, material, 0.2, MARK_WIDTH_M, 0.025));
+    group.add(holder);
+  }
+  return group;
+}
+
+/**
+ * The bright band of the own approach, built once per course and re-shaped by every frame (nothing new is built for
+ * another state or length): the clean tier as a fill, the perfect tier as a brighter core inside it, and an outline
+ * around the band — the outline alone while the horse is on the way or the band has no length.
+ */
+interface Band {
+  group: THREE.Group;
+  fill: THREE.Mesh;
+  core: THREE.Mesh;
+  outline: THREE.Mesh[];
+  fillMaterial: THREE.MeshBasicMaterial;
+}
+
+function makeBand(): Band {
+  const group = new THREE.Group();
+  const geometry = new THREE.PlaneGeometry(1, 1);
+  const fillMaterial = new THREE.MeshBasicMaterial({ color: COLOURS.clean, transparent: true, opacity: 0.8 });
+  const coreMaterial = new THREE.MeshBasicMaterial({ color: COLOURS.perfect, transparent: true, opacity: 0.9 });
+  const outlineMaterial = new THREE.MeshBasicMaterial({ color: COLOURS.outline });
+  const fill = flat(geometry, fillMaterial, 1, MARK_WIDTH_M, 0.03);
+  const core = flat(geometry, coreMaterial, 1, MARK_WIDTH_M, 0.035);
+  const outline = [0, 1, 2, 3].map(() => flat(geometry, outlineMaterial, 1, 1, 0.04));
+  group.add(fill, core, ...outline);
+  return { group, fill, core, outline, fillMaterial };
+}
+
+/** Shape the band for one frame's marker: placed at its take-off point, lengths from its half-lengths, lit by its state. */
+function shapeBand(band: Band, track: Track, marker: TakeoffMarker): void {
+  const point = pointAt(track, marker.distanceM);
+  band.group.position.set(point.x, 0, point.z);
+  band.group.rotation.y = -point.heading;
+  band.group.visible = true;
+  const length = marker.cleanHalfM === null ? OUTLINE_LENGTH_M : 2 * marker.cleanHalfM;
+  const lit = marker.cleanHalfM !== null && marker.state !== 'approach';
+  band.fill.visible = lit;
+  band.fill.scale.x = length;
+  band.fillMaterial.color.setHex(marker.state === 'late' ? COLOURS.late : marker.state === 'perfect' ? COLOURS.perfect : COLOURS.clean);
+  band.core.visible = lit && marker.state !== 'late' && marker.perfectHalfM !== null;
+  band.core.scale.x = 2 * (marker.perfectHalfM ?? 0);
+  const [near, far, left, right] = band.outline;
+  const halfWidth = MARK_WIDTH_M / 2;
+  for (const strip of [near, far]) strip?.scale.set(OUTLINE_STRIP_M, MARK_WIDTH_M, 1);
+  near?.position.set(-length / 2, near.position.y, 0);
+  far?.position.set(length / 2, far.position.y, 0);
+  for (const strip of [left, right]) strip?.scale.set(length, OUTLINE_STRIP_M, 1);
+  left?.position.set(0, left.position.y, -halfWidth);
+  right?.position.set(0, right.position.y, halfWidth);
+}
+
 export function createArenaScene(): ArenaScene {
   const scene = new THREE.Scene();
   scene.background = new THREE.Color(COLOURS.sky);
@@ -190,6 +275,9 @@ export function createArenaScene(): ArenaScene {
   let course: CourseSpec | null = null;
   const horses = new Map<string, { group: THREE.Group; label: HTMLElement }>();
   let walkAngle = 0;
+  /** The own approach's band of the current course (built on its first frame) and the marker the last frame drew. */
+  let band: Band | null = null;
+  let shownMarker: TakeoffMarker | null = null;
 
   function sizeToContainer(): void {
     if (!renderer || !container) return;
@@ -213,10 +301,27 @@ export function createArenaScene(): ArenaScene {
     horses.clear();
   }
 
-  /** The course's objects leave the scene, their resources freed. */
+  /** The course's objects — its take-off marks and band included — leave the scene, their resources freed. */
   function clearCourse(): void {
     for (const child of [...courseGroup.children]) disposeTree(child);
     courseGroup.clear();
+    band = null;
+    shownMarker = null;
+  }
+
+  /** The own approach's band as the frame says: shaped at its fence, or hidden when the frame carries none. */
+  function drawMarker(marker: TakeoffMarker | null): void {
+    if (!track || !course || marker === null) {
+      if (band) band.group.visible = false;
+      shownMarker = null;
+      return;
+    }
+    if (!band) {
+      band = makeBand();
+      courseGroup.add(band.group);
+    }
+    shapeBand(band, track, marker);
+    shownMarker = { ...marker };
   }
 
   function horseFor(id: string, isOwn: boolean, index: number): { group: THREE.Group; label: HTMLElement } {
@@ -274,6 +379,7 @@ export function createArenaScene(): ArenaScene {
       }
       track = buildTrack(next);
       courseGroup.add(makeTrackRibbon(track));
+      courseGroup.add(makeWeakMarks(track, next));
       for (const fence of next.fences) {
         const pose = fencePose(track, next, fence.number);
         const group = makeFence(fence.number);
@@ -298,6 +404,7 @@ export function createArenaScene(): ArenaScene {
         horse.group.visible = seen.has(id);
         horse.label.style.display = seen.has(id) ? '' : 'none';
       }
+      drawMarker(frame.takeoff);
       if (frame.camera) {
         camera.position.set(frame.camera.position.x, frame.camera.position.y, frame.camera.position.z);
         camera.lookAt(frame.camera.target.x, frame.camera.target.y, frame.camera.target.z);
@@ -318,11 +425,16 @@ export function createArenaScene(): ArenaScene {
     },
 
     markers(): MarkerView[] {
-      throw new NotImplementedError('the arena take-off markers (K1.1 step 7)');
+      if (!course) return [];
+      const views: MarkerView[] = course.fences.map((fence) => ({ fence: fence.number, kind: 'weak', state: null, lengthM: null }));
+      if (shownMarker) {
+        views.push({ fence: shownMarker.fence, kind: 'bright', state: shownMarker.state, lengthM: shownMarker.cleanHalfM === null ? null : 2 * shownMarker.cleanHalfM });
+      }
+      return views;
     },
 
     drawCalls(): number | null {
-      throw new NotImplementedError('the arena draw-call count for the debug overlay (K1.1 step 9)');
+      return renderer ? renderer.info.render.calls : null;
     },
 
     dispose(): void {
