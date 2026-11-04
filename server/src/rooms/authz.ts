@@ -17,8 +17,11 @@ export type RoomMessage =
   // Part B2 — rider commands (only riders of the running heat; always about the sender's own horse, plan 2.3):
   | { type: 'tap'; clientTime: number; fence: number; attempt: number }
   | { type: 'turn'; choice: TurnChoice; clientTime: number }
-  | { type: 'gear'; gear: Gear }
-  | { type: 'line'; line: 'center' | 'angle' }
+  // A gear or line command may carry seq (K1.1 code audit r2): the sender's own number for it, monotonic per page; the
+  // room answers it by that number ('control-applied' or 'refused', see LobbyRoom). Without seq (an older client) the
+  // command is still applied and answered with seq null.
+  | { type: 'gear'; gear: Gear; seq?: number }
+  | { type: 'line'; line: 'center' | 'angle'; seq?: number }
   // Part B2 — lobby settings of the sender (any participant) and the clock answer:
   | { type: 'height'; heightClass: HeightClass }
   | { type: 'assists'; schoolmaster: boolean; widerWindow: boolean }
@@ -30,7 +33,8 @@ export const RIDER_ONLY_MESSAGES: ReadonlySet<RoomMessage['type']> = new Set(['t
 /**
  * Numbers must be finite; clientTime is the client's clock in ms; fence is 1..maxFence; attempt is any positive
  * safe integer — the attempt number is NOT the number of disobediences (every fall restarts the fence without
- * counting as one), so the server, not the message shape, decides whether it is the current attempt.
+ * counting as one), so the server, not the message shape, decides whether it is the current attempt. The seq of a
+ * gear or line command is a safe integer ≥ 0 (the client's own numbering; the server only echoes it).
  */
 export const MESSAGE_NUMBER_LIMITS = { maxFence: 12 } as const;
 
@@ -59,6 +63,7 @@ const isFiniteNumber = (value: unknown): value is number => typeof value === 'nu
 const isFence = (value: unknown): value is number =>
   typeof value === 'number' && Number.isInteger(value) && value >= 1 && value <= MESSAGE_NUMBER_LIMITS.maxFence;
 const isAttempt = (value: unknown): value is number => typeof value === 'number' && Number.isSafeInteger(value) && value >= 1;
+const isSeq = (value: unknown): value is number => typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
 const isClassOrder = (value: unknown): value is 'random' | 'lowest-class-first' => typeof value === 'string' && CLASS_ORDERS.has(value);
 const isTurnChoice = (value: unknown): value is TurnChoice => typeof value === 'string' && TURN_CHOICES.has(value);
 const isGear = (value: unknown): value is Gear => typeof value === 'string' && GEARS.has(value);
@@ -127,11 +132,17 @@ export function validateRoomMessage(raw: unknown): Result<RoomMessage, 'malforme
     }
     case 'gear': {
       const gear = record['gear'];
-      return exact('gear') && isGear(gear) ? ok({ type, gear }) : err('malformed');
+      const seq = record['seq'];
+      if (!isGear(gear)) return err('malformed');
+      if (exact('gear')) return ok({ type, gear });
+      return exact('gear', 'seq') && isSeq(seq) ? ok({ type, gear, seq }) : err('malformed');
     }
     case 'line': {
       const line = record['line'];
-      return exact('line') && isLine(line) ? ok({ type, line }) : err('malformed');
+      const seq = record['seq'];
+      if (!isLine(line)) return err('malformed');
+      if (exact('line')) return ok({ type, line });
+      return exact('line', 'seq') && isSeq(seq) ? ok({ type, line, seq }) : err('malformed');
     }
     // ---- Part B2: lobby settings and the clock answer ----
     case 'height': {

@@ -1245,3 +1245,153 @@ describe("the results boundary says whether another heat follows (audit K1 r3 #6
     await hostSeat.client.leave();
   }, 40000);
 });
+
+describe('K1.1 code audit r2: the server tells the rider the controls and the rules it judges her with', () => {
+  type ControlApplied = { seq: number | null; at: number; requestedGear: string; line: string };
+  type Refused = { error: string; seq?: number };
+  type ClassRules = { classNumber: number; heightClass: number; mode: string; assists: { schoolmaster: boolean; widerWindow: boolean } };
+  type SyncWithControls = ApproachSync & { requestedGear: string; line: string; at: number };
+  const acks = (seat: Seat) => seat.received.filter((m) => m.type === 'control-applied').map((m) => m.payload as ControlApplied);
+  const refusedPayloads = (seat: Seat) => seat.received.filter((m) => m.type === 'refused').map((m) => m.payload as Refused);
+  const classRules = (seat: Seat) => seat.received.filter((m) => m.type === 'class-rules').map((m) => m.payload as ClassRules);
+  const syncs = (seat: Seat) => seat.received.filter((m) => m.type === 'approach-sync').map((m) => m.payload as SyncWithControls);
+
+  it('every gear and line command is answered to its sender only: its seq, the receive time it is applied at, and her requested gear and line once it is applied', async () => {
+    const { entry, room, riders } = await openRoom(2);
+    const [host, friend] = riders as [Rider, Rider];
+    const hostSeat = await sit(room.roomId, entry.code, host.token, host.account.id);
+    const friendSeat = await sit(room.roomId, entry.code, friend.token, friend.account.id);
+    await startRiding(hostSeat);
+    const before = serverNow();
+    hostSeat.client.send('room', { type: 'gear', gear: 'extended', seq: 1 });
+    hostSeat.client.send('room', { type: 'line', line: 'angle', seq: 2 });
+    hostSeat.client.send('room', { type: 'gear', gear: 'gallop', seq: 3 });
+    hostSeat.client.send('room', { type: 'line', line: 'center', seq: 4 });
+    hostSeat.client.send('room', { type: 'gear', gear: 'collected' }); // an older client: no seq
+    await until(() => acks(hostSeat).length === 5, 3000, 'five answers');
+    const after = serverNow();
+    expect(acks(hostSeat).map(({ seq, requestedGear, line }) => ({ seq, requestedGear, line }))).toEqual([
+      { seq: 1, requestedGear: 'extended', line: 'center' },
+      { seq: 2, requestedGear: 'extended', line: 'angle' },
+      { seq: 3, requestedGear: 'gallop', line: 'angle' },
+      { seq: 4, requestedGear: 'gallop', line: 'center' },
+      { seq: null, requestedGear: 'collected', line: 'center' },
+    ]);
+    const times = acks(hostSeat).map((ack) => ack.at);
+    for (const at of times) {
+      expect(Number.isInteger(at)).toBe(true); // a game-clock millisecond, as the change log keeps it
+      expect(at).toBeGreaterThanOrEqual(before);
+      expect(at).toBeLessThanOrEqual(after);
+    }
+    expect([...times].sort((a, b) => a - b)).toEqual(times); // in the order the room received them
+    expect(acks(friendSeat)).toEqual([]); // the answer is the sender's alone
+    expect(refusals(hostSeat)).toEqual([]);
+    // What the answers said is what the horse does: her own gear, then the state's (the gear in force) once ticked.
+    hostSeat.client.send('room', { type: 'gear', gear: 'extended', seq: 5 });
+    await until(() => hostSeat.client.state.riders.get(host.account.id)?.gear === 'extended', 2000, 'the state in extended canter');
+    expect(acks(hostSeat).at(-1)).toMatchObject({ seq: 5, requestedGear: 'extended', line: 'center' });
+    await friendSeat.client.leave();
+    await hostSeat.client.leave();
+  }, 30000);
+
+  it('a refused gear or line command names its seq; a refused command without seq is refused as before', async () => {
+    const { entry, room, riders } = await openRoom(2);
+    const [host, friend] = riders as [Rider, Rider];
+    const hostSeat = await sit(room.roomId, entry.code, host.token, host.account.id);
+    // Before the class nobody rides.
+    hostSeat.client.send('room', { type: 'gear', gear: 'gallop', seq: 11 });
+    hostSeat.client.send('room', { type: 'line', line: 'angle', seq: 12 });
+    hostSeat.client.send('room', { type: 'gear', gear: 'gallop' });
+    await until(() => refusedPayloads(hostSeat).length === 3, 2000, 'three refusals');
+    expect(refusedPayloads(hostSeat)).toEqual([{ error: 'not-riding', seq: 11 }, { error: 'not-riding', seq: 12 }, { error: 'not-riding' }]);
+    expect(acks(hostSeat)).toEqual([]);
+    // During the heat, someone admitted after the start is no rider of it: refused by the seq of her command.
+    const friendSeat = await sit(room.roomId, entry.code, friend.token, friend.account.id);
+    await startRiding(hostSeat);
+    const late = await registerRider(services, uniqueRiderName('Late'));
+    await services.rooms.requestJoin(entry.code, late.account.id);
+    services.rooms.hostAction(entry.code, host.account.id, { type: 'admit', accountId: late.account.id });
+    const lateSeat = await sit(room.roomId, entry.code, late.token, late.account.id);
+    lateSeat.client.send('room', { type: 'line', line: 'angle', seq: 0 });
+    hostSeat.client.send('room', { type: 'line', line: 'angle', seq: 13 });
+    await until(() => refusedPayloads(lateSeat).length === 1 && acks(hostSeat).length === 1, 2000, 'the refusal and the answer');
+    expect(refusedPayloads(lateSeat)).toEqual([{ error: 'not-riding', seq: 0 }]);
+    expect(acks(lateSeat)).toEqual([]);
+    expect(acks(hostSeat)[0]).toMatchObject({ seq: 13, line: 'angle' }); // her own command of the same moment is applied
+    await lateSeat.client.leave();
+    await friendSeat.client.leave();
+    await hostSeat.client.leave();
+  }, 20000);
+
+  it("a rider of the class is told her frozen rules — at the start, on a fresh join during the class and on a reconnection by the token — and nobody else's", async () => {
+    const { entry, room, riders } = await openRoom(2);
+    const [host, friend] = riders as [Rider, Rider];
+    const hostSeat = await sit(room.roomId, entry.code, host.token, host.account.id);
+    const friendSeat = await sit(room.roomId, entry.code, friend.token, friend.account.id);
+    friendSeat.client.send('room', { type: 'height', heightClass: 80 });
+    friendSeat.client.send('room', { type: 'assists', schoolmaster: true, widerWindow: true });
+    await sleep(100);
+    expect(classRules(hostSeat)).toEqual([]); // nothing before the class
+    await startRiding(hostSeat);
+    const hostRules: ClassRules = { classNumber: 1, heightClass: 70, mode: 'ranked', assists: { schoolmaster: false, widerWindow: false } };
+    const friendRules: ClassRules = { classNumber: 1, heightClass: 80, mode: 'ranked', assists: { schoolmaster: true, widerWindow: true } };
+    expect(classRules(hostSeat)).toEqual([hostRules]);
+    expect(classRules(friendSeat)).toEqual([friendRules]);
+    const types = friendSeat.received.map((m) => m.type).filter((type) => type === 'class-course' || type === 'class-rules');
+    expect(types).toEqual(['class-course', 'class-rules']); // right after the course
+    // A change in the lobby during the class is for the next class: the rules told stay the frozen ones.
+    friendSeat.client.send('room', { type: 'assists', schoolmaster: false, widerWindow: false });
+    await sleep(100);
+    const token = friendSeat.client.reconnectionToken;
+    await friendSeat.client.leave(false);
+    await until(() => hostSeat.client.state.riders.get(friend.account.id)?.autopilot === true, 3000, 'autopilot on after the drop');
+    const back = reattach(await sdk(friend.token).reconnect<LobbyState>(token), friend);
+    await until(() => classRules(back).length > 0, 2000, 'the rules on the reconnection');
+    expect(classRules(back)).toEqual([friendRules]);
+    const again = await sit(room.roomId, entry.code, friend.token, friend.account.id);
+    await until(() => classRules(again).length > 0, 2000, 'the rules on the fresh join');
+    expect(classRules(again)).toEqual([friendRules]);
+    const order = again.received.map((m) => m.type).filter((type) => ['class-course', 'class-rules', 'class-phase', 'approach-sync'].includes(type));
+    expect(order).toEqual(['class-course', 'class-rules', 'class-phase', 'approach-sync']);
+    expect(classRules(hostSeat)).toEqual([hostRules]); // never another rider's
+    await again.client.leave();
+    await back.client.leave().catch(() => undefined);
+    await hostSeat.client.leave();
+  }, 30000);
+
+  it('approach-sync carries her requested gear and line as of its own moment, and the state already says the autopilot is off when it arrives', async () => {
+    const { entry, room, riders } = await openRoom(2, LATE_FENCE_COURSE);
+    const [host, friend] = riders as [Rider, Rider];
+    const hostSeat = await sit(room.roomId, entry.code, host.token, host.account.id);
+    const friendSeat = await sit(room.roomId, entry.code, friend.token, friend.account.id);
+    await startRiding(hostSeat);
+    friendSeat.client.send('room', { type: 'gear', gear: 'gallop', seq: 1 });
+    friendSeat.client.send('room', { type: 'line', line: 'angle', seq: 2 });
+    await until(() => acks(friendSeat).length === 2, 2000, 'both answers');
+    const token = friendSeat.client.reconnectionToken;
+    await friendSeat.client.leave(false); // gone: whatever she sends now is lost
+    await until(() => hostSeat.client.state.riders.get(friend.account.id)?.autopilot === true, 3000, 'autopilot on after the drop');
+    const reconnected = await sdk(friend.token).reconnect<LobbyState>(token);
+    const back = reattach(reconnected, friend);
+    let autopilotAtSync: boolean | undefined;
+    // A specific handler takes the message from the wildcard (see sit): it records the sync itself.
+    reconnected.onMessage('approach-sync', (payload: unknown) => {
+      autopilotAtSync = reconnected.state.riders.get(friend.account.id)?.autopilot;
+      back.received.push({ type: 'approach-sync', payload });
+    });
+    await until(() => syncs(back).length > 0, 2000, 'approach-sync on the new connection');
+    const sync = syncs(back)[0];
+    expect(sync).toMatchObject({ classNumber: 1, heatIndex: 0, requestedGear: 'gallop', line: 'angle' });
+    expect(Number.isInteger(sync?.at)).toBe(true);
+    expect(sync?.at ?? 0).toBeGreaterThanOrEqual(acks(friendSeat).at(-1)?.at ?? Number.POSITIVE_INFINITY);
+    expect(sync?.at ?? Number.POSITIVE_INFINITY).toBeLessThanOrEqual(serverNow());
+    expect(autopilotAtSync).toBe(false);
+    // From the sync on, her commands are answered on the new connection, on top of what the sync said.
+    back.client.send('room', { type: 'line', line: 'center', seq: 3 });
+    await until(() => acks(back).length === 1, 2000, 'the answer on the new connection');
+    expect(acks(back)[0]).toMatchObject({ seq: 3, requestedGear: 'gallop', line: 'center' });
+    expect(acks(back)[0]?.at ?? 0).toBeGreaterThanOrEqual(sync?.at ?? Number.POSITIVE_INFINITY);
+    await back.client.leave();
+    await hostSeat.client.leave();
+  }, 30000);
+});

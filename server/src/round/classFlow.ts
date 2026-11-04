@@ -1,7 +1,8 @@
 // A class (plan 1.7): heats of up to four over one course — course walk, round, results — until every heat has
 // ridden, then one class table grouped by height class. Pure: driven by tick(now).
-import type { AssistSettings, CourseSpec, EliminationReason, HeatOrder, HeightClass, RiderStatus, RoundMode } from '@open-jumps/shared';
+import type { AssistSettings, CourseSpec, EliminationReason, Gear, HeatOrder, HeightClass, RiderStatus, RoundMode } from '@open-jumps/shared';
 import { HeatSchedule } from '../rooms/heatSchedule.js';
+import type { Line } from './courseRunner.js';
 import { RoundEngine, type RiderCommand, type RoundEvent, type RoundResult, type RoundSnapshot } from './roundEngine.js';
 
 export const CLASS_TIMING = {
@@ -214,6 +215,22 @@ export class ClassFlow {
   /** Commands reach the running heat only; others are dropped. */
   enqueue(command: RiderCommand): void {
     this.engine()?.enqueue(command);
+  }
+
+  /** A rider's controls in the running heat once every command received is applied (RoundEngine.controlsOf); null outside it. */
+  controlsOf(riderId: string): { requestedGear: Gear; line: Line } | null {
+    return this.engine()?.controlsOf(riderId) ?? null;
+  }
+
+  /** The mode of the class's rounds. */
+  get mode(): RoundMode {
+    return this.setup.mode;
+  }
+
+  /** A rider of the class with her height class and the assists frozen when the class was built; null for anyone else. */
+  rider(riderId: string): ClassRider | null {
+    const rider = this.riderById.get(riderId);
+    return rider === undefined ? null : { riderId: rider.riderId, heightClass: rider.heightClass, assists: { ...rider.assists } };
   }
 
   riderDisconnected(riderId: string, now: number): void {

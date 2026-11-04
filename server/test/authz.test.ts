@@ -156,3 +156,35 @@ describe('part B2: rider commands and lobby settings', () => {
     }
   });
 });
+
+describe('K1.1 code audit r2: a gear or line command may carry its seq', () => {
+  it('accepts a gear or a line with a seq — a safe integer from 0 — and keeps it in the message; without seq it is the older command', () => {
+    for (const raw of [
+      { type: 'gear', gear: 'gallop', seq: 0 },
+      { type: 'gear', gear: 'extended', seq: 41 },
+      { type: 'line', line: 'angle', seq: 7 },
+      { type: 'line', line: 'center', seq: Number.MAX_SAFE_INTEGER },
+      { type: 'gear', gear: 'collected' },
+      { type: 'line', line: 'angle' },
+    ]) {
+      expect(validateRoomMessage(raw)).toEqual({ ok: true, value: raw });
+    }
+  });
+
+  it('negative: a seq that is not a safe integer from 0 is malformed, and so is a seq on any other command', () => {
+    for (const raw of [
+      { type: 'gear', gear: 'gallop', seq: -1 },
+      { type: 'gear', gear: 'gallop', seq: 1.5 },
+      { type: 'gear', gear: 'gallop', seq: '3' },
+      { type: 'gear', gear: 'gallop', seq: Number.NaN },
+      { type: 'line', line: 'angle', seq: null },
+      { type: 'line', line: 'angle', seq: Number.MAX_SAFE_INTEGER + 1 },
+      { type: 'gear', gear: 'warp', seq: 1 },
+      { type: 'gear', gear: 'gallop', seq: 1, riderId: 'someone-else' },
+      { type: 'tap', clientTime: 1, fence: 1, attempt: 1, seq: 1 },
+      { type: 'turn', choice: 'left', clientTime: 1, seq: 1 },
+    ]) {
+      expect(validateRoomMessage(raw)).toEqual({ ok: false, error: 'malformed' });
+    }
+  });
+});

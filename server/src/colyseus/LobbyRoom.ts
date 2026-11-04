@@ -81,19 +81,39 @@ export interface LobbyRoomDeps {
  *   drive anything.
  * - Rider commands ('tap', 'turn', 'gear', 'line') are accepted only from riders of the running heat and always
  *   act on the sender's own horse (there is no horse id in the message, plan 2.3 / matrix row 20); anyone else is
- *   refused ('not-riding'). Take-off and turn decisions are broadcast as 'round-event' { riderId, ...event }; the
+ *   refused ('not-riding'). K1.1 code audit r2 — the server is the client's source of the controls it judges with:
+ *   · A 'gear' or 'line' command may carry `seq`, the sender's own number for it (monotonic per page; validated as a
+ *     safe integer ≥ 0). Every gear and line command the room applies is answered to the sender — that connection
+ *     only — with 'control-applied' { seq, at, requestedGear, line }: seq as sent (null for a command without one, an
+ *     older client), `at` the game-clock receive time the command is applied at (the moment from which the judge reads
+ *     it: the course runner's change log), and the rider's requested gear and line once it is applied (with every
+ *     command received before it). The answer goes at receipt: the command waits in the engine's queue until the tick
+ *     of its millisecond, but nothing can come before it any more.
+ *   · A refused rider command names its seq when it carried one: 'refused' { error, seq } ('not-riding', or
+ *     'not-participant' from the door); without seq the refusal is { error } as before. So the sender knows which of
+ *     its commands the server never applied.
+ *   · 'class-rules' { classNumber, heightClass, mode, assists: { schoolmaster, widerWindow } } tells each rider of a
+ *     class what the server froze for her at start-class — her height class, the rounds' mode and her assists, the
+ *     very rules her rounds are judged with — to her connections only: at the start of the class right after
+ *     'class-course', to a rider joining during the class right after 'class-course', and again on a reconnection by
+ *     the token. Nobody else gets a rider's rules.
+ *   Take-off and turn decisions are broadcast as 'round-event' { riderId, ...event }; the
  *   'approach' event carries speedMps (K1.1 step 5): the approach speed the server froze at the zone entry (m/s, the
  *   runner's Approach.speed) — the rules, windows and judging do not change, the clients only draw from it.
  * - A dropped connection during 'riding' keeps the seat for reconnectSeconds (Colyseus allowReconnection) with
  *   the horse on autopilot; a reconnection with the token — or a fresh join by the same account, also after the
  *   reservation expired — hands control back; an expired reservation never withdraws the rider (the horse waits
  *   and the time limit decides, plan 2.3). On handing control back the room sends that connection — and only it —
- *   'approach-sync' { classNumber, heatIndex, hardTurn, approach: { fence, attempt, t0, speedMps } | null }: the
- *   approach the server has open for the rider's horse right now and still undecided (null between fences, in
- *   flight, stopped), and the hard-turn flag in force; the 'approach' broadcast went only to the connections alive
- *   when it opened, so this is how a returning client arms (or disarms) its take-off tap (audit K1 r2 #1). A fresh
- *   join gets it right after 'class-course' and 'class-phase'; a token reconnection also gets a new clock series, on
- *   the NEW connection. A kick or a session revocation while a reconnection is pending rejects it (the old token is dead,
+ *   'approach-sync' { classNumber, heatIndex, hardTurn, approach: { fence, attempt, t0, speedMps } | null,
+ *   requestedGear, line, at }: the approach the server has open for the rider's horse right now and still undecided
+ *   (null between fences, in flight, stopped), and the hard-turn flag in force; the 'approach' broadcast went only to
+ *   the connections alive when it opened, so this is how a returning client arms (or disarms) its take-off tap (audit
+ *   K1 r2 #1). requestedGear and line are the rider's controls as they stand at `at` (the game clock when the sync is
+ *   sent), every command received so far applied (K1.1 code audit r2): whatever the old connection sent and never
+ *   heard answered was applied before `at` or never, and from `at` on these are her controls until her next command.
+ *   Control is back from `at`: the autopilot is off, and the state's rider entry says so before the sync goes (its
+ *   values are published at once, not at the next tick). A fresh join gets it right after 'class-course',
+ *   'class-rules' and 'class-phase'; a token reconnection also gets a new clock series, on the NEW connection. A kick or a session revocation while a reconnection is pending rejects it (the old token is dead,
  *   B1 checks are never bypassed). A consented leave withdraws the rider (eliminated 'disconnected'); the heat goes
  *   on, also with no client connected at all.
  * - The tick that ends a heat publishes the heat's final snapshot (ClassFlow.finalSnapshot) into `riders` in the
@@ -128,8 +148,8 @@ export interface LobbyRoomDeps {
  *   finishes — and its results are written — even if every rider dropped. The injected `course` is used as is
  *   (production courses come from clubCourse and are valid; tests inject short ones).
  * Ids: the n-th class of a room is `${code}-${n}` (n from 1); its heats are rounds `${code}-${n}#${heatIndex}`.
- * Refusal codes sent as 'refused' { error }: 'not-riding' (a rider command outside 'riding' or from someone not
- * in the running heat), 'clock-not-ready', 'height-not-allowed' (not a class of the sender's pony category),
+ * Refusal codes sent as 'refused' { error } (plus seq for a numbered gear or line command): 'not-riding' (a rider
+ * command outside 'riding' or from someone not in the running heat), 'clock-not-ready', 'height-not-allowed' (not a class of the sender's pony category),
  * 'class-running' (start-class during a class, or while the previous start-class is still being prepared),
  * 'class-not-ready' (start-class while the profile of a participant still admitted and still unknown cannot be read;
  * nothing starts, the host may try again), plus B1's 'host-only' / 'not-participant' / 'not-available'.
@@ -465,6 +485,7 @@ export class LobbyRoom extends Room<{ state: LobbyState }> {
     // and, once done, the table.
     if (this.flow !== null && this.course !== null) {
       client.send('class-course', { course: this.course, classNumber: this.classNumber });
+      this.sendClassRules(client, accountId);
       const startedAt = this.flow.phaseStartedAt;
       if (startedAt !== null) client.send('class-phase', { phase: this.flow.phase, heatIndex: this.flow.heatIndex, startedAt, endsAt: this.flow.phaseEndsAt() });
       this.syncApproach(client, accountId);
@@ -537,6 +558,7 @@ export class LobbyRoom extends Room<{ state: LobbyState }> {
       // new connection at once: the last 'clock-offset' may have been lost with the old one (audit K1 r4 #2).
       this.announceClock(back);
       this.startClockSync(back);
+      this.sendClassRules(back, accountId);
       this.syncApproach(back, accountId);
     } catch {
       // Expired, rejected or superseded: the socket is gone; the rider keeps riding (autopilot, then waiting).
@@ -557,8 +579,37 @@ export class LobbyRoom extends Room<{ state: LobbyState }> {
     const engine = flow?.engine() ?? null;
     if (flow === null || engine === null || !this.heatRiders.has(accountId)) return;
     const own = engine.approachOf(accountId);
-    if (own === null) return;
-    client.send('approach-sync', { classNumber: this.classNumber, heatIndex: flow.heatIndex, hardTurn: own.hardTurn, approach: own.approach });
+    const controls = engine.controlsOf(accountId);
+    if (own === null || controls === null) return;
+    // Control is back: the state says so before the sync goes (the autopilot off), so no snapshot the returning client
+    // reads after the sync still shows the autopilot of the time away.
+    this.syncRiders(flow);
+    client.send('approach-sync', {
+      classNumber: this.classNumber,
+      heatIndex: flow.heatIndex,
+      hardTurn: own.hardTurn,
+      approach: own.approach,
+      requestedGear: controls.requestedGear,
+      line: controls.line,
+      at: this.serverNow(),
+    });
+  }
+
+  /**
+   * Tell a rider of the class, on this connection only, the rules the server froze for her at start-class (K1.1 code
+   * audit r2): her height class, the mode and her assists — what her rounds are judged with, whatever her lobby says
+   * now. Nothing for someone who does not ride in the class.
+   */
+  private sendClassRules(client: Client, accountId: string): void {
+    const flow = this.flow;
+    const rider = flow?.rider(accountId) ?? null;
+    if (flow === null || rider === null) return;
+    client.send('class-rules', {
+      classNumber: this.classNumber,
+      heightClass: rider.heightClass,
+      mode: flow.mode,
+      assists: { schoolmaster: rider.assists.schoolmaster, widerWindow: rider.assists.widerWindow },
+    });
   }
 
   private rejectReconnection(accountId: string): void {
@@ -656,8 +707,13 @@ export class LobbyRoom extends Room<{ state: LobbyState }> {
     this.course = course;
     this.heatRiders = new Set();
     this.lastTable = null;
-    // Everyone in the room gets the course before the walk starts (the arena and the course walk draw it).
+    // Everyone in the room gets the course before the walk starts (the arena and the course walk draw it), and every
+    // rider of the class the rules frozen for her (K1.1 code audit r2).
     this.broadcast('class-course', { course, classNumber: this.classNumber });
+    for (const connected of this.clients) {
+      const id = this.accountBySession.get(connected.sessionId);
+      if (id !== undefined) this.sendClassRules(connected, id);
+    }
     this.flow.start(this.serverNow());
     if (!this.simulating) {
       this.simulating = true;
@@ -892,16 +948,24 @@ export class LobbyRoom extends Room<{ state: LobbyState }> {
   private riderCommand(client: Client, actorId: string, message: RoomMessage): void {
     const flow = this.flow;
     if (!flow || flow.phase !== 'riding' || !this.heatRiders.has(actorId)) {
-      client.send('refused', { error: 'not-riding' });
+      this.refuse(client, 'not-riding', message);
       return;
     }
     const receiveTime = this.serverNow();
-    if (message.type === 'gear') {
-      flow.enqueue({ riderId: actorId, receiveTime, kind: 'gear', gear: message.gear });
-      return;
-    }
-    if (message.type === 'line') {
-      flow.enqueue({ riderId: actorId, receiveTime, kind: 'line', line: message.line });
+    if (message.type === 'gear' || message.type === 'line') {
+      flow.enqueue(
+        message.type === 'gear'
+          ? { riderId: actorId, receiveTime, kind: 'gear', gear: message.gear }
+          : { riderId: actorId, receiveTime, kind: 'line', line: message.line },
+      );
+      // The answer to the sender (K1.1 code audit r2): the command is applied at receiveTime, and these are her
+      // controls from then on — the engine applies its queue in receive order, so nothing can come before it any more.
+      const controls = flow.controlsOf(actorId);
+      if (controls === null) {
+        this.refuse(client, 'not-riding', message);
+        return;
+      }
+      client.send('control-applied', { seq: message.seq ?? null, at: receiveTime, requestedGear: controls.requestedGear, line: controls.line });
       return;
     }
     const sync = this.activeClock(client.sessionId);
@@ -915,6 +979,12 @@ export class LobbyRoom extends Room<{ state: LobbyState }> {
     } else if (message.type === 'turn') {
       flow.enqueue({ riderId: actorId, receiveTime, kind: 'turn', choice: message.choice, actionTime });
     }
+  }
+
+  /** A refusal to the sender; a numbered gear or line command is named by its seq (K1.1 code audit r2). */
+  private refuse(client: Client, error: string, message?: RoomMessage): void {
+    const seq = message !== undefined && (message.type === 'gear' || message.type === 'line') ? message.seq : undefined;
+    client.send('refused', seq === undefined ? { error } : { error, seq });
   }
 
   /** The game clock (audit K1 r5 #1): every game time of the room is read here, never from the calendar clock. */
@@ -969,7 +1039,7 @@ export class LobbyRoom extends Room<{ state: LobbyState }> {
     if (!parsed.ok) return;
     const allowed = authorizeRoomMessage(entry.admission, actorId, parsed.value);
     if (!allowed.ok) {
-      client.send('refused', { error: allowed.error });
+      this.refuse(client, allowed.error, parsed.value);
       return;
     }
     const message = parsed.value;

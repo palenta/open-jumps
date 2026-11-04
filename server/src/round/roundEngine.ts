@@ -223,6 +223,28 @@ export class RoundEngine {
     return { approach: entry.runner.undecidedApproach(), hardTurn: entry.runner.snapshot().recentHardTurn };
   }
 
+  /**
+   * A rider's controls once every command already received is applied — the gear she asked for and her line — or null
+   * for a rider who is not in this round (K1.1 code audit r2). Queued commands are applied at their receive time, in
+   * receive order (tick), so this is what the course runner holds for every moment from the last one received: what
+   * the room's acknowledgement of a gear or line command and its 'approach-sync' tell the rider.
+   */
+  controlsOf(riderId: string): { requestedGear: Gear; line: Line } | null {
+    const entry = this.byId.get(riderId);
+    if (!entry) return null;
+    const runner = entry.runner.snapshot();
+    let requestedGear = runner.requestedGear;
+    let line = runner.line;
+    const queued = this.queue
+      .filter((item) => item.command.riderId === riderId)
+      .sort((a, b) => a.command.receiveTime - b.command.receiveTime || a.seq - b.seq);
+    for (const { command } of queued) {
+      if (command.kind === 'gear') requestedGear = command.gear;
+      else if (command.kind === 'line') line = command.line;
+    }
+    return { requestedGear, line };
+  }
+
   riderDisconnected(riderId: string, now: number): void {
     this.byId.get(riderId)?.runner.disconnected(now);
   }
