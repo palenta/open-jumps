@@ -50,14 +50,35 @@ em { color: var(--accent-2); font-style: normal; }
 .horse-label { position: absolute; transform: translate(-50%, -100%); background: rgba(0, 0, 0, 0.55); color: #fff; padding: 2px 8px; border-radius: 8px; font-size: 0.85rem; white-space: nowrap; }
 .screen.walk, .screen.round { position: relative; padding: 0; overflow: hidden; }
 .arena-slot { position: absolute; inset: 0; }
-.walk-panel { position: absolute; z-index: 2; left: calc(12px + var(--safe-left)); top: calc(12px + var(--safe-top)); max-width: 46%; background: var(--panel); border-radius: 16px; padding: 12px 16px; font-size: 0.95rem; }
+.walk-panel { position: absolute; z-index: 2; left: calc(12px + var(--safe-left)); top: calc(12px + var(--safe-top)); bottom: calc(12px + var(--safe-bottom)); width: 34%; overflow: auto; background: var(--panel); border-radius: 16px; padding: 10px 14px; font-size: 0.85rem; }
+.walk-panel h1 { font-size: 1.2rem; }
 .walk-panel ol { padding-left: 18px; }
-.focus { font-size: 1.4rem; font-weight: 700; color: var(--accent-2); }
+.walk-panel li { margin: 3px 0; }
+.focus { font-size: 1.4rem; font-weight: 700; color: var(--accent-2); margin: 6px 0; }
+
+/* The map of the route on the walk (K1.1 step 4): it reads on its own; the fly-over stays behind it. */
+.walk-map-panel { position: absolute; z-index: 2; top: calc(12px + var(--safe-top)); right: calc(12px + var(--safe-right)); bottom: calc(12px + var(--safe-bottom)); left: calc(34% + 24px + var(--safe-left)); background: var(--panel); border-radius: 16px; padding: 6px; }
+.walk-map { display: block; width: 100%; height: 100%; }
+.walk-route { fill: none; stroke: var(--accent-2); stroke-width: 4; stroke-linecap: round; stroke-linejoin: round; }
+.walk-fence line { stroke: #ffffff; stroke-width: 4; stroke-linecap: round; }
+.walk-fence text { fill: #ffffff; font-size: 14px; font-weight: 700; text-anchor: middle; dominant-baseline: central; }
+.walk-fence[data-focus="true"] line { stroke: #ff6b6b; stroke-width: 6; }
+.walk-fence[data-focus="true"] text { fill: #ff6b6b; font-size: 18px; }
+.walk-turn { fill: #4fc3f7; stroke: #0b3d57; stroke-width: 1; }
+.walk-start circle { fill: #27ae60; }
+.walk-finish circle { fill: var(--danger); }
+.walk-start text, .walk-finish text { fill: var(--ink); font-size: 12px; font-weight: 600; text-anchor: middle; }
 
 /* Controls on the arena (positioned by the layout in arena coordinates) */
 .control { position: absolute; display: flex; align-items: center; justify-content: center; border-radius: 14px; background: rgba(255, 255, 255, 0.14); border: 2px solid rgba(255, 255, 255, 0.35); color: rgba(255, 255, 255, 0.85); font-weight: 600; font-size: 0.9rem; pointer-events: none; }
 .control-tap { border-style: dashed; border-radius: 24px; }
-.control-tap[data-armed="true"] { background: rgba(233, 196, 106, 0.3); border-color: var(--accent-2); color: #fff; }
+.control-tap[data-armed="true"] { background: rgba(233, 196, 106, 0.7); border-color: var(--accent-2); border-style: solid; color: #1b1f1b; }
+/* The own turn window lights both direction buttons alike (no hint of the way); the chosen one until the verdict. */
+.control-turn-left[data-window="open"], .control-turn-right[data-window="open"] { background: rgba(79, 195, 247, 0.5); border-color: #4fc3f7; color: #fff; }
+.control[data-chosen="true"] { background: rgba(79, 195, 247, 0.85); border-width: 4px; color: #fff; }
+/* Every touch of a zone answers for 150 ms: a bright flash when it went out, a dim one when it did nothing. */
+.control[data-pressed="sent"] { background: rgba(255, 255, 255, 0.8); border-color: #ffffff; color: #1b1f1b; }
+.control[data-pressed="ignored"] { opacity: 0.35; }
 .rotate { position: absolute; inset: 0; z-index: 5; display: flex; align-items: center; justify-content: center; background: rgba(0, 0, 0, 0.85); font-size: 1.4rem; text-align: center; padding: 24px; }
 .rotate[hidden] { display: none; }
 
@@ -67,6 +88,16 @@ em { color: var(--accent-2); font-style: normal; }
 .hud-bottom { position: absolute; bottom: 8px; left: 50%; transform: translateX(-50%); display: flex; gap: 16px; align-items: center; background: var(--panel); border-radius: 12px; padding: 6px 14px; max-width: 70%; }
 [data-hud-caption] { color: var(--accent-2); }
 .badge { position: absolute; top: 8px; left: 8px; background: rgba(192, 57, 43, 0.85); color: #fff; font-size: 0.75rem; padding: 3px 8px; border-radius: 8px; }
+/* Why a touch did nothing (1.2 s) and what a press changed (1 s), under the HUD's top line. */
+.press-note, .toast { position: absolute; left: 50%; transform: translateX(-50%); padding: 6px 14px; border-radius: 12px; font-weight: 700; font-size: 1.1rem; white-space: nowrap; text-shadow: none; }
+.press-note { top: 16%; background: rgba(192, 57, 43, 0.92); color: #fff; }
+.toast { top: 27%; background: rgba(20, 24, 20, 0.88); color: var(--accent-2); }
+.press-note[hidden], .toast[hidden] { display: none; }
+
+/* The debug overlay (?debug, K1.1 step 9): English, read on the phone, never in the way of a finger. */
+.debug { position: fixed; z-index: 20; top: calc(4px + var(--safe-top)); right: calc(4px + var(--safe-right)); max-width: 44%; padding: 4px 8px; border-radius: 6px; background: rgba(0, 0, 0, 0.62); color: #ffffff; font: 11px/1.3 ui-monospace, Menlo, monospace; pointer-events: none; }
+.debug-presses { margin: 0; padding-left: 16px; }
+.debug-presses li { margin: 0; }
 
 /* Results */
 .results table { border-collapse: collapse; margin: 12px 0; min-width: 320px; }
