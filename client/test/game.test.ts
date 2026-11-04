@@ -2983,6 +2983,15 @@ describe('the debug overlay (K1.1 step 9)', () => {
     return h;
   }
   const rows = (h: Harness): HTMLElement[] => [...h.root.querySelectorAll<HTMLElement>('[data-debug] [data-debug-press]')];
+  /**
+   * A row's data attributes as a browser's dataset reads them, '' values included. happy-dom's dataset answers no
+   * property descriptor for an attribute whose value is '' (its getOwnPropertyDescriptor returns nothing for a falsy
+   * value), so toMatchObject on row.dataset never sees data-reason="" — the contract's value for an event moment.
+   */
+  const dataOf = (row: HTMLElement): Record<string, string> =>
+    Object.fromEntries(
+      [...row.attributes].filter((a) => a.name.startsWith('data-')).map((a) => [a.name.slice(5).replace(/-([a-z])/g, (_, c: string) => c.toUpperCase()), a.value]),
+    );
   const newest = (h: Harness): HTMLElement => {
     const row = rows(h)[0];
     if (row === undefined) throw new Error('no press row in the overlay');
@@ -3046,7 +3055,7 @@ describe('the debug overlay (K1.1 step 9)', () => {
     h.clock.t = t0 + 40;
     press(h, TAP, t0 + 30);
     const row = newest(h);
-    expect(row.dataset).toMatchObject({
+    expect(dataOf(row)).toMatchObject({
       zone: 'tap',
       timeStamp: String(t0 + 30),
       source: 'event',
@@ -3085,7 +3094,7 @@ describe('the debug overlay (K1.1 step 9)', () => {
     approachOwn(h, 1, 1, t0, 5);
     h.clock.t = t0 + 20;
     press(h, TAP, h.clock.now() - PACKET.maxAgeMs - 1);
-    expect(newest(h).dataset).toMatchObject({ zone: 'tap', outcome: 'too-old', source: 'event', reason: '' });
+    expect(dataOf(newest(h))).toMatchObject({ zone: 'tap', outcome: 'too-old', source: 'event', reason: '' });
     expect(h.session().sentOf('tap')).toEqual([]);
   });
 
@@ -3103,7 +3112,7 @@ describe('the debug overlay (K1.1 step 9)', () => {
     h.clock.t = t0 + 10;
     press(h, TAP, t0);
     takeoffOwn(h, null);
-    expect(newest(h).dataset).toMatchObject({ judge: 'no-tap', judgeOffset: '' });
+    expect(dataOf(newest(h))).toMatchObject({ judge: 'no-tap', judgeOffset: '' });
   });
 
   it("negative: another rider's take-off of the same fence and attempt is never matched", async () => {
@@ -3218,7 +3227,7 @@ describe('the debug overlay (K1.1 step 9)', () => {
     turnAheadOwn(h);
     h.clock.t += 400;
     press(h, TURN_LEFT);
-    expect(newest(h).dataset).toMatchObject({ zone: 'turn-left', outcome: 'sent', turnQuality: '' });
+    expect(dataOf(newest(h))).toMatchObject({ zone: 'turn-left', outcome: 'sent', turnQuality: '' });
     turnVerdict(h, 'host', 'wide');
     expect(newest(h).dataset.turnQuality).toBe('wide');
   });
