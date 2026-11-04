@@ -6,7 +6,6 @@
 // line from its own last line shift, a hard turn from its own last turn verdict, the class height; spooks and the
 // lead-horse bonus are unknown here (false), so the window can only be narrower than the server's, never wider.
 import { windowForAttempt, type ApproachState, type Gear, type HeightClass, type RoundRules, type TakeoffWindow } from '@open-jumps/shared';
-import { NotImplementedError } from '../errors.js';
 
 export interface WindowContext {
   heightClass: HeightClass;
@@ -25,50 +24,71 @@ export interface WindowContext {
  *   angleSharp: line === 'angle', recentHardTurn, spooked: false, leadHorseBonus: false }.
  * - windowAt(at): windowForAttempt(stateAt(at), rules) from shared — the window in force for the round's rules (a
  *   wider window only in training with the assist on).
- * - configure(context): another height or other rules from now on (a new round of the same class).
+ * - configure(context): another height or other rules from now on (a new round of the same class); rules: the
+ *   round's rules in force, which the judge applies together with the window.
  * Reading never changes anything.
  */
 export class ApproachWindow {
   private context: WindowContext;
+  /** The gears set with their moments, in time order: the gear in force at a moment is the last one set at or before it. */
+  private gears: { gear: Gear; at: number }[] = [];
+  private line: 'center' | 'angle' = 'center';
+  private hardTurn = false;
 
   constructor(context: WindowContext) {
     this.context = context;
   }
 
   configure(context: WindowContext): void {
-    void context;
-    throw new NotImplementedError('ApproachWindow.configure (K1.1 step 6)');
+    this.context = context;
+  }
+
+  /** The round's rules in force: what the judge applies together with the window. */
+  get rules(): RoundRules {
+    return this.context.rules;
   }
 
   setGear(gear: Gear, at: number): void {
-    void gear;
-    void at;
-    throw new NotImplementedError('ApproachWindow.setGear (K1.1 step 6)');
+    // From `at` on this gear is in force: whatever was set for a later moment is superseded.
+    this.gears = this.gears.filter((entry) => entry.at < at);
+    if (this.gearAt(at) !== gear) this.gears.push({ gear, at });
   }
 
   setLine(line: 'center' | 'angle'): void {
-    void line;
-    throw new NotImplementedError('ApproachWindow.setLine (K1.1 step 6)');
+    this.line = line;
   }
 
   setHardTurn(on: boolean): void {
-    void on;
-    throw new NotImplementedError('ApproachWindow.setHardTurn (K1.1 step 6)');
+    this.hardTurn = on;
   }
 
   /** The fence the hard turn applied to was cleared (a take-off verdict with cleared: true): the flag is spent. */
   clearedFence(): void {
-    throw new NotImplementedError('ApproachWindow.clearedFence (K1.1 step 6)');
+    this.hardTurn = false;
   }
 
   stateAt(at: number): ApproachState {
-    void at;
-    void this.context;
-    throw new NotImplementedError('ApproachWindow.stateAt (K1.1 step 6)');
+    return {
+      gear: this.gearAt(at),
+      heightClass: this.context.heightClass,
+      angleSharp: this.line === 'angle',
+      recentHardTurn: this.hardTurn,
+      spooked: false,
+      leadHorseBonus: false,
+    };
   }
 
   windowAt(at: number): TakeoffWindow {
-    void at;
-    throw new NotImplementedError('ApproachWindow.windowAt (K1.1 step 6)');
+    return windowForAttempt(this.stateAt(at), this.context.rules);
+  }
+
+  /** The gear in force at `at`: the last one set at or before it, 'collected' before the first. */
+  private gearAt(at: number): Gear {
+    let gear: Gear = 'collected';
+    for (const entry of this.gears) {
+      if (entry.at > at) break;
+      gear = entry.gear;
+    }
+    return gear;
   }
 }

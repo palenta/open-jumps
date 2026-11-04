@@ -3,16 +3,7 @@
 // event, ≤150 ms later on a normal network) replaces it when they differ — the server always wins. K1.1 step 6:
 // the approach state and the window come from the one shared source, ApproachWindow (approachWindow.ts), which
 // the take-off marker reads too; the hint keeps no copy of its own.
-import {
-  judgeAttempt,
-  NO_TAP_LIMIT_MS,
-  windowForAttempt,
-  type ApproachState,
-  type Gear,
-  type HeightClass,
-  type RoundRules,
-  type TakeoffOutcome,
-} from '@open-jumps/shared';
+import { judgeAttempt, NO_TAP_LIMIT_MS, type Gear, type HeightClass, type RoundRules, type TakeoffOutcome } from '@open-jumps/shared';
 import type { ClientClock } from '../net/clientClock.js';
 import { ApproachWindow } from './approachWindow.js';
 
@@ -61,21 +52,15 @@ const favourableRoll = (): number => 1;
  * judges with. tap(clientTime) judges with approachWindow.stateAt(clientTime) and approachWindow.windowAt(clientTime);
  * setGear (at the clock's now), setLine, setHardTurn and configure forward to it, and a cleared verdict spends its
  * hard turn (clearedFence). assumedApproach moves into ApproachWindow — no second copy stays here.
- * K1.1 contract stage: the hint still judges with its K1 copy below; approachWindow is the source it will use.
  */
 export class InstantHint {
   private readonly clock: ClientClock;
-  private context: HintContext;
   private readonly source: ApproachWindow;
-  private gear: Gear = 'collected';
-  private line: 'center' | 'angle' = 'center';
-  private hardTurn = false;
   private open: OpenApproach | null = null;
   private shown: Hint | null = null;
 
   constructor(clock: ClientClock, context: HintContext, approachWindow: ApproachWindow = new ApproachWindow(context)) {
     this.clock = clock;
-    this.context = context;
     this.source = approachWindow;
   }
 
@@ -85,7 +70,7 @@ export class InstantHint {
   }
 
   configure(context: HintContext): void {
-    this.context = context;
+    this.source.configure(context);
   }
 
   /** The server opened an approach for this rider: t0 is server time. Resets any earlier tap. */
@@ -100,7 +85,7 @@ export class InstantHint {
    * missed.
    */
   sync(sync: { hardTurn: boolean; approach: { fence: number; attempt: number; t0: number } | null }): void {
-    this.hardTurn = sync.hardTurn;
+    this.source.setHardTurn(sync.hardTurn);
     const next = sync.approach;
     if (next === null) {
       this.open = null;
@@ -112,17 +97,18 @@ export class InstantHint {
     this.approach(next);
   }
 
+  /** The gear the state reports, in force from the clock's now on (a tap stamped before it still reads the gear before). */
   setGear(gear: Gear): void {
-    this.gear = gear;
+    this.source.setGear(gear, this.clock.now());
   }
 
   setLine(line: 'center' | 'angle'): void {
-    this.line = line;
+    this.source.setLine(line);
   }
 
   /** The last turn's outcome said hardTurn (narrower window at the next fence); spent by the take-off that clears that fence. */
   setHardTurn(on: boolean): void {
-    this.hardTurn = on;
+    this.source.setHardTurn(on);
   }
 
   /**
@@ -137,9 +123,9 @@ export class InstantHint {
     open.tapped = true;
 
     const offsetMs = serverTime - open.t0;
-    const approach = this.assumedApproach();
-    const outcome = judgeAttempt(approach, offsetMs, favourableRoll, this.context.rules);
-    const window = windowForAttempt(approach, this.context.rules);
+    const approach = this.source.stateAt(clientTime);
+    const outcome = judgeAttempt(approach, offsetMs, favourableRoll, this.source.rules);
+    const window = this.source.windowAt(clientTime);
     const counted = Math.abs(offsetMs) <= NO_TAP_LIMIT_MS;
     const provisional = approach.gear === 'gallop' && counted && Math.abs(offsetMs) <= window.cleanMs;
 
@@ -154,7 +140,7 @@ export class InstantHint {
     this.shown = null;
     // The hard turn lasts until the fence it applies to is cleared, exactly as the server keeps recentHardTurn: a
     // refusal, run-out or fall leaves it in force for the next attempt of the same fence (audit K1 r1 #8).
-    if (event.outcome.cleared) this.hardTurn = false;
+    if (event.outcome.cleared) this.source.clearedFence();
     if (shown === null || shown.fence !== event.fence || shown.attempt !== event.attempt) {
       return { hint: null, verdict: event.outcome, agreed: null };
     }
@@ -164,16 +150,5 @@ export class InstantHint {
   /** The hint shown right now (null once the server's verdict replaced it or no tap happened). */
   current(): Hint | null {
     return this.shown;
-  }
-
-  private assumedApproach(): ApproachState {
-    return {
-      gear: this.gear,
-      heightClass: this.context.heightClass,
-      angleSharp: this.line === 'angle',
-      recentHardTurn: this.hardTurn,
-      spooked: false,
-      leadHorseBonus: false,
-    };
   }
 }
