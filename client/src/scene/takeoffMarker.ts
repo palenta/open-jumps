@@ -4,7 +4,6 @@
 // approach is open. Pure: the game computes the marker of every frame from the shared window source
 // (ApproachWindow) and the approach the server announced; the arena draws it. No three.js here.
 import type { TakeoffWindow } from '@open-jumps/shared';
-import { NotImplementedError } from '../errors.js';
 
 /**
  * Where the clock stands against the take-off moment, by the window of the moment (d = toServer(now) − t0):
@@ -33,11 +32,13 @@ export interface TakeoffMarker {
   perfectHalfM: number | null;
 }
 
+/** A speed the band can be measured with: a finite number above 0. */
+const hasSpeed = (speedMps: number | null): speedMps is number => speedMps !== null && Number.isFinite(speedMps) && speedMps > 0;
+
 /** The band's half-lengths in metres for a window and the frozen approach speed; null when there is no speed (null, not finite, ≤ 0). */
 export function markerHalfLengths(window: TakeoffWindow, speedMps: number | null): { cleanHalfM: number; perfectHalfM: number } | null {
-  void window;
-  void speedMps;
-  throw new NotImplementedError('markerHalfLengths (K1.1 step 7)');
+  if (!hasSpeed(speedMps)) return null;
+  return { cleanHalfM: (window.cleanMs / 1000) * speedMps, perfectHalfM: (window.perfectMs / 1000) * speedMps };
 }
 
 /**
@@ -45,9 +46,10 @@ export function markerHalfLengths(window: TakeoffWindow, speedMps: number | null
  * not measured) for an approach with take-off moment t0, the window of the moment and the frozen speed (null: none).
  */
 export function markerState(serverNow: number | null, t0: number, window: TakeoffWindow, speedMps: number | null): MarkerState {
-  void serverNow;
-  void t0;
-  void window;
-  void speedMps;
-  throw new NotImplementedError('markerState (K1.1 step 7)');
+  if (serverNow === null || !hasSpeed(speedMps)) return 'approach';
+  const d = serverNow - t0;
+  if (d < -window.cleanMs) return 'approach';
+  if (Math.abs(d) <= window.perfectMs) return 'perfect';
+  if (d <= window.cleanMs) return 'clean';
+  return 'late';
 }
