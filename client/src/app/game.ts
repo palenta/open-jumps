@@ -157,9 +157,9 @@ interface DebugPress {
   clientTime: number;
   handledAt: number;
   outcome: PressOutcome;
-  /** A tap that went out: its class and heat, fence and attempt, the local offset at the press and the judge's word. */
+  /** A tap that went out: its room session, class and heat (debugKey), fence and attempt, the local offset at the press and the judge's word. */
   tap: { key: string; fence: number; attempt: number; localOffset: number | null; judge: 'pending' | 'accepted' | 'unconfirmed' | 'no-tap'; judgeOffset: number | null } | null;
-  /** A turn that went out: its class and heat, and the quality of the own verdict ('' until it arrives). */
+  /** A turn that went out: its room session, class and heat (debugKey), and the quality of the own verdict ('' until it arrives). */
   turn: { key: string; quality: string } | null;
 }
 
@@ -399,7 +399,9 @@ interface RoundModules {
  *     otherwise; 'no-tap' when its offsetMs is null. data-judge-offset is the judge's offsetMs ('' while pending or
  *     for 'no-tap'). Another rider's 'takeoff' — also of the same fence and attempt — is never matched; a new class
  *     or heat clears the matching: a tap of the old one is never matched to a verdict of the new (its row stays,
- *     'pending').
+ *     'pending'). So does every new room session — leaving the room, a refused or a fresh connection, another room,
+ *     signing out or in (K1.1 code audit r1, finding 2): a new room starts again at class 1, heat 1, so a tap or a
+ *     turn of the old room is never matched to a verdict of the new one; its row stays as it was.
  *   · A turn that went out carries data-turn-quality: outcome.quality of the own 'turn' verdict ('' until it arrives).
  *   · [data-debug-stats] below the rows: data-fps — the frames per second over the last second of frame(now) calls
  *     (the count of frames in (now − 1000, now]) — and data-calls, scene.drawCalls() ('' when null).
@@ -479,6 +481,8 @@ export function createGame(deps: GameDeps): Game {
   const debugList = doc.createElement('ol');
   const debugStats = doc.createElement('div');
   let debugPresses: DebugPress[] = [];
+  /** The room session the debug rows belong to: a new room, session or rider starts a new one (K1.1 code audit r1, finding 2). */
+  let debugSession = 0;
   const frameTimes: number[] = [];
   if (debugPanel) {
     debugPanel.dataset.debug = '';
@@ -581,6 +585,11 @@ export function createGame(deps: GameDeps): Game {
   function roundKey(): string {
     const current = state();
     return `${String(round?.classNumber ?? 0)}#${String(current?.heatIndex ?? -1)}`;
+  }
+
+  /** The debug overlay's matching key: the room session, then the class and heat (every new room starts at class 1 again). */
+  function debugKey(): string {
+    return `${String(debugSession)}/${roundKey()}`;
   }
 
   /** Feed a state patch to the round modules. */
@@ -749,6 +758,7 @@ export function createGame(deps: GameDeps): Game {
     for (const unsubscribe of unsubscribeSession) unsubscribe();
     unsubscribeSession = [];
     session = null;
+    debugSession += 1;
     sessionEnd = null;
     view = null;
     viewPendingCount = -1;
@@ -761,6 +771,7 @@ export function createGame(deps: GameDeps): Game {
     const next = deps.session();
     session = next;
     sessionEnd = null;
+    debugSession += 1;
     roomId = id;
     roomCode = code;
     unsubscribeSession = [
@@ -998,7 +1009,7 @@ export function createGame(deps: GameDeps): Game {
     if (sent?.type === 'line') toast = showFor(toast, `hud.toast.line.${sent.line}`, FEEDBACK.toastMs, () => (toast = null));
     if (sent?.type === 'turn') round.chosen = control;
     if (debugPanel) {
-      const key = roundKey();
+      const key = debugKey();
       const t0AtDevice = armedT0 === null ? null : deps.clock.toClient(armedT0);
       recordDebugPress({
         zone: control,
@@ -1051,13 +1062,13 @@ export function createGame(deps: GameDeps): Game {
   }
 
   /**
-   * The own 'takeoff' verdict against the tap rows of the current class and heat with its fence and attempt: 'no-tap'
-   * when the judge saw none; 'accepted' when its offset is within DEBUG.acceptMs of the local estimate and neither the
-   * schoolmaster nor the autopilot rode the horse; 'unconfirmed' otherwise.
+   * The own 'takeoff' verdict against the tap rows of the current room session, class and heat with its fence and
+   * attempt: 'no-tap' when the judge saw none; 'accepted' when its offset is within DEBUG.acceptMs of the local
+   * estimate and neither the schoolmaster nor the autopilot rode the horse; 'unconfirmed' otherwise.
    */
   function judgeDebugTap(event: Extract<RoundEventWire, { type: 'takeoff' }>): void {
     if (!debugPanel || !round || me === null) return;
-    const key = roundKey();
+    const key = debugKey();
     const automatic = round.schoolmaster || round.autopilot || state()?.riders[me.id]?.autopilot === true;
     for (const press of debugPresses) {
       const tap = press.tap;
@@ -1069,10 +1080,10 @@ export function createGame(deps: GameDeps): Game {
     renderDebugRows();
   }
 
-  /** The own 'turn' verdict names the quality of the latest turn that went out in this class and heat. */
+  /** The own 'turn' verdict names the quality of the latest turn that went out in this room session, class and heat. */
   function qualifyDebugTurn(quality: string): void {
     if (!debugPanel) return;
-    const key = roundKey();
+    const key = debugKey();
     const pending = debugPresses.find((press) => press.turn !== null && press.turn.key === key && press.turn.quality === '');
     if (pending?.turn) pending.turn.quality = quality;
     renderDebugRows();
@@ -1492,6 +1503,7 @@ export function createGame(deps: GameDeps): Game {
   }
 
   function signedIn(profile: PublicProfile): void {
+    if (me?.id !== profile.id) debugSession += 1;
     me = profile;
     signinError = '';
     const allowed = allowedHeightClasses(profile.ponyCategory);

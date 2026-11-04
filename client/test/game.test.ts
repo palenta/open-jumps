@@ -3383,6 +3383,66 @@ describe('the debug overlay (K1.1 step 9)', () => {
     expect(judgeOf(h, old)).toEqual(['pending', '']);
   });
 
+  /** The host riding heat 1 of class 1 in room A (ABCDEF), the overlay on; a second room (GHJKLM) is scripted for later. */
+  async function debugRoomA(): Promise<Harness> {
+    const h = await hostInLobby({ createRoom: [ok({ code: 'ABCDEF', roomId: 'r1' }), ok({ code: 'GHJKLM', roomId: 'r2' })] }, snapshot(), undefined, true);
+    startClass(h);
+    await settle();
+    expect(h.root.dataset.screen).toBe('round');
+    return h;
+  }
+  /** Room A's connection is lost for good before any verdict; she goes home and opens room B, which starts again at class 1, heat 1. */
+  async function intoRoomB(h: Harness): Promise<void> {
+    const roomA = h.session();
+    roomA.end = { kind: 'lost', code: 1006 };
+    roomA.emitStatus('ended');
+    await settle();
+    expect(h.root.dataset.screen).toBe('ended');
+    click(h.root, '[data-action="leave"]');
+    await settle();
+    expect(h.root.dataset.screen).toBe('home');
+    click(h.root, '[data-action="create-room"]');
+    await settle();
+    expect(h.session()).not.toBe(roomA);
+    expect(h.session().connects.at(-1)).toEqual(['r2', 'GHJKLM']);
+    startClass(h);
+    await settle();
+    expect(h.root.dataset.screen).toBe('round');
+    h.clock.t += 2_000;
+  }
+
+  it("a new room clears the matching (K1.1 code audit r1, finding 2): room B's verdict of class 1, heat 1, the same fence, attempt and offset confirms room B's tap only, never the tap left pending in room A", async () => {
+    const h = await debugRoomA();
+    const inA = tapAt30(h, 1, 1);
+    await intoRoomB(h);
+    expect(judgeOf(h, inA)).toEqual(['pending', '']); // the old row stays, as it was
+    const inB = tapAt30(h, 1, 1);
+    verdictOwn(h, 1, 1, 40);
+    expect(judgeOf(h, inB)).toEqual(['accepted', '40']);
+    expect(judgeOf(h, inA)).toEqual(['pending', '']);
+  });
+
+  it("a new room clears the matching of a turn too (K1.1 code audit r1, finding 2): room B's turn verdicts qualify room B's turn only, never the turn left pending in room A", async () => {
+    const h = await debugRoomA();
+    turnAheadOwn(h);
+    h.clock.t += 400;
+    const inA = h.clock.now();
+    press(h, TURN_LEFT);
+    expect(dataOf(rowOf(h, inA))).toMatchObject({ zone: 'turn-left', outcome: 'sent', turnQuality: '' });
+    await intoRoomB(h);
+    turnAheadOwn(h);
+    turnVerdict(h, 'host', 'missed'); // room B's turn, no finger: nothing of hers to qualify
+    expect(rowOf(h, inA).getAttribute('data-turn-quality')).toBe('');
+    h.clock.t += 6_000;
+    turnAheadOwn(h);
+    h.clock.t += 400;
+    const inB = h.clock.now();
+    press(h, TURN_LEFT);
+    turnVerdict(h, 'host', 'tight');
+    expect(rowOf(h, inB).dataset.turnQuality).toBe('tight');
+    expect(rowOf(h, inA).getAttribute('data-turn-quality')).toBe('');
+  });
+
   it('a turn that went out shows the quality of the own turn verdict', async () => {
     const h = await debugRound();
     turnAheadOwn(h);
