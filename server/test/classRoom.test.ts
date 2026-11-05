@@ -667,24 +667,24 @@ describe('audit round 1 of B2: one live room per code, checks before the reserva
     await hostSeat.client.leave();
   }, 45000);
 
-  it('two live sessions of one account: dropping one leaves the other in control, without autopilot', async () => {
+  it('two devices of one account: the newer takes control and the older is closed as opened elsewhere — no drop, so no autopilot; the newer drives (K1.1 code audit r3: one controlling connection per account)', async () => {
     const { entry, room, riders } = await openRoom(2);
     const [host, friend] = riders as [Rider, Rider];
     const hostSeat = await sit(room.roomId, entry.code, host.token, host.account.id);
     const phone = await sit(room.roomId, entry.code, friend.token, friend.account.id);
+    const phoneClosed = new Promise<number>((resolve) => phone.client.onLeave((code: number) => resolve(code)));
     const tablet = await sit(room.roomId, entry.code, friend.token, friend.account.id);
+    expect(await phoneClosed).toBe(OPENED_ELSEWHERE_CLOSE_CODE); // the tablet opened the game: the phone is closed
     await clocksSynced();
     await startRiding(hostSeat);
-    await sleep(300);
-    await tablet.client.leave(false); // the tablet sleeps; the phone is still playing
-    await sleep(600);
+    await sleep(900);
     expect(hostSeat.client.state.riders.get(friend.account.id)?.autopilot).toBe(false);
-    phone.client.send('room', { type: 'gear', gear: 'extended' });
-    await until(() => hostSeat.client.state.riders.get(friend.account.id)?.gear === 'extended', 2000, 'the phone still drives');
-    expect(refusals(phone)).toEqual([]);
+    tablet.client.send('room', { type: 'gear', gear: 'extended' });
+    await until(() => hostSeat.client.state.riders.get(friend.account.id)?.gear === 'extended', 2000, 'the tablet drives');
+    expect(refusals(tablet)).toEqual([]);
     await until(() => hostSeat.client.state.phase === 'done', 25000, "phase 'done'");
     expect((await services.repos.results.listByAccount(friend.account.id))[0]).toMatchObject({ status: 'finished', autopilot: false });
-    await phone.client.leave();
+    await tablet.client.leave();
     await hostSeat.client.leave();
   }, 45000);
 
