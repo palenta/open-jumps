@@ -372,9 +372,11 @@ interface RoundModules {
  *     monotonic for the page) and is a state the judge may use from its send moment on, until the server's
  *     'control-applied' answer places it exactly at its receive time with her controls from then on — or its 'refused'
  *     (by seq) drops it; until then the window is the narrowest over every state the server may be in (it applies her
- *     commands in order), so the band and the hint never promise more than the judge may use. The state patches' gear
- *     settles nothing and no timeout does. A connection that drops leaves its unanswered commands to the next
- *     'approach-sync', whose controls (her requested gear and line as of the sync) replace them. The schoolmaster
+ *     commands of one connection in order), so the band and the hint never promise more than the judge may use. The
+ *     state patches' gear settles nothing and no timeout does. A connection that drops leaves its unanswered commands
+ *     to the next 'approach-sync', whose controls (her requested gear and line as of the sync) replace them; until
+ *     that sync nothing orders them against the new connection's commands or answers (K1.1 code audit r3): any run of
+ *     them may still come on top of whatever the new connection's answers say. The schoolmaster
  *     the server froze for the class ('class-rules' — never the lobby's checkbox), the own autopilot (the server's
  *     state and events; off from an 'approach-sync') and a wide turn (until the fence is cleared) keep the canter
  *     collected whatever was pressed (the shared gearInForce); once that ends, the requested gear the server told

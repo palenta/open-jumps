@@ -4004,4 +4004,76 @@ describe('the server tells the window which controls and rules it judges with (K
     approachOwn(h, 1, 1, t0, 5);
     expect(half(h)).toBeCloseTo(band(CLEAN), 9);
   });
+
+  // K1.1 code audit r3, P2 #1: nothing orders the old connection's commands against the new one's. Codex's case at
+  // 70 cm: gallop confirmed on the centre line; a Pace to collected goes out and is lost with the old connection; on the
+  // new connection, before its sync, a line shift to the angle. The server may hold gallop on the angle (±63 ms): a tap
+  // 70 ms late is a run-out for the judge, never clean — the band and the hint say so before the sync, after it and
+  // after the answer, with a sync or without one.
+  const GALLOP_ANGLE_CLEAN = 63;
+  type Stage = 'before the sync' | 'after the sync' | 'after the sync and the answer' | 'without a sync, after the answer';
+
+  /** Codex's case up to `stage`; the approach of fence 1 is open with t0 one second after the gallop was confirmed. */
+  function lostCollectedThenAngle(h: Harness, stage: Stage): number {
+    paceAnswered(h, 'extended');
+    paceAnswered(h, 'gallop'); // the server's log: gallop on the centre line
+    const t0 = h.clock.now() + 1_000;
+    approachOwn(h, 1, 1, t0, 5);
+    h.clock.t += 50;
+    press(h, GEAR); // → collected: lost with the old connection
+    expect(h.session().sentOf('gear').at(-1)?.gear).toBe('collected');
+    h.session().emitStatus('dropped');
+    h.clock.t += 300;
+    h.session().emitStatus('connected');
+    const synced = h.clock.now();
+    h.clock.t += 20;
+    press(h, TURN_LEFT); // → angle, on the new connection, before its sync
+    expect(h.session().sentOf('line').at(-1)?.line).toBe('angle');
+    if (stage === 'after the sync' || stage === 'after the sync and the answer') {
+      h.session().emitMessage({
+        type: 'approach-sync',
+        classNumber: 1,
+        heatIndex: 0,
+        hardTurn: false,
+        approach: { fence: 1, attempt: 1, t0, speedMps: 5 },
+        controls: { requestedGear: 'gallop', line: 'center', at: synced }, // the collected never reached the server
+      });
+    }
+    if (stage === 'after the sync and the answer' || stage === 'without a sync, after the answer') {
+      answer(h, h.session().seqOfLast('line'), h.clock.now(), 'gallop', 'angle'); // applied now: the answer comes after
+    }
+    return t0;
+  }
+
+  it.each<Stage>(['before the sync', 'after the sync', 'after the sync and the answer', 'without a sync, after the answer'])(
+    "Codex's case — gallop confirmed, a collected lost with the old connection, the angle of the new one — %s: the band is gallop-on-the-angle's and a tap 70 ms late is a run-out, never clean (K1.1 code audit r3)",
+    async (stage) => {
+      const h = await inRound();
+      const t0 = lostCollectedThenAngle(h, stage);
+      expect(half(h)).toBeCloseTo(band(GALLOP_ANGLE_CLEAN), 9);
+      h.clock.t = t0 + 70;
+      expect(half(h)).toBeCloseTo(band(GALLOP_ANGLE_CLEAN), 9);
+      press(h, TAP);
+      expect(caption(h)).toBe(hinted('desvio'));
+    },
+  );
+
+  it('without a sync the answer of the new connection orders nothing: a gallop lost with the old connection may still come on top of its angle — the band and a tap 70 ms late stay gallop-on-the-angle\'s (K1.1 code audit r3)', async () => {
+    const h = await inRound();
+    const t0 = h.clock.now() + 1_000;
+    approachOwn(h, 1, 1, t0, 5);
+    press(h, GEAR); // → extended
+    press(h, GEAR); // → gallop: neither answered, the connection goes
+    h.session().emitStatus('dropped');
+    h.clock.t += 300;
+    h.session().emitStatus('connected');
+    h.clock.t += 20;
+    press(h, TURN_LEFT); // → angle, on the new connection
+    answer(h, h.session().seqOfLast('line'), h.clock.now(), 'collected', 'angle'); // the gallop had not arrived by then
+    expect(half(h)).toBeCloseTo(band(GALLOP_ANGLE_CLEAN), 9);
+    h.clock.t = t0 + 70;
+    expect(half(h)).toBeCloseTo(band(GALLOP_ANGLE_CLEAN), 9);
+    press(h, TAP);
+    expect(caption(h)).toBe(hinted('desvio'));
+  });
 });

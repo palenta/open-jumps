@@ -346,3 +346,100 @@ describe('ApproachWindow — the server\'s controls log and the commands it has 
     expect('requestGear' in window).toBe(false);
   });
 });
+
+describe('ApproachWindow — two connections: nothing orders one against the other (K1.1 code audit r3, P2 #1)', () => {
+  /** 70 cm, straight: collected ±157.5 ms clean, gallop ±78.75, the sharp line ±126, gallop on the sharp line ±63. */
+  const GALLOP_70 = CLEAN_70 * WINDOW_MODIFIERS.gallop;
+  const ANGLE_70 = CLEAN_70 * WINDOW_MODIFIERS.sharpAngle;
+  const GALLOP_ANGLE_70 = CLEAN_70 * WINDOW_MODIFIERS.gallop * WINDOW_MODIFIERS.sharpAngle;
+  const answer = (seq: number | null, at: number, requestedGear: 'collected' | 'extended' | 'gallop', line: 'center' | 'angle' = 'center') => ({ seq, at, requestedGear, line });
+
+  /**
+   * Codex's case: the server confirms gallop on the centre line; a collected goes out and is lost with the old
+   * connection; on the new one, before its sync, the angle goes out. The server may hold gallop on the angle.
+   */
+  function codexCase(): ApproachWindow {
+    const window = new ApproachWindow(context70);
+    window.sent(10, { gear: 'gallop' }, 900);
+    window.applied(answer(10, 950, 'gallop'));
+    window.sent(11, { gear: 'collected' }, 1_000); // lost with the old connection
+    window.connectionLost();
+    window.sent(12, { line: 'angle' }, 1_200); // the new connection, before its sync
+    return window;
+  }
+
+  it("Codex's case before the sync: the old connection's collected never arrived and the new angle did — gallop on the angle, ±63 ms, never ±78.75", () => {
+    const window = codexCase();
+    expect(window.windowAt(1_100).cleanMs).toBeCloseTo(GALLOP_70, 9); // the angle had not gone out yet
+    expect(window.stateAt(1_300)).toMatchObject({ gear: 'gallop', angleSharp: true });
+    expect(window.windowAt(1_300).cleanMs).toBeCloseTo(GALLOP_ANGLE_70, 9);
+    expect(70).toBeGreaterThan(window.windowAt(1_300).cleanMs); // a tap 70 ms late is outside the clean tier, as for the judge
+  });
+
+  it("Codex's case through the sync and the answer: the sync rules the lost collected out from its moment, the angle stays pending on top — ±63 ms before and after the answer", () => {
+    const window = codexCase();
+    window.synced({ at: 1_250, requestedGear: 'gallop', line: 'center' }); // the collected never reached the server
+    expect(window.windowAt(1_240).cleanMs).toBeCloseTo(GALLOP_70, 9); // before the sync: the new connection's angle came after it
+    expect(window.windowAt(1_300).cleanMs).toBeCloseTo(GALLOP_ANGLE_70, 9);
+    window.applied(answer(12, 1_280, 'gallop', 'angle'));
+    expect(window.windowAt(1_270).cleanMs).toBeCloseTo(GALLOP_70, 9); // the server's gallop on the centre until the answer
+    expect(window.windowAt(1_300).cleanMs).toBeCloseTo(GALLOP_ANGLE_70, 9);
+    expect(window.windowAt(9_000).cleanMs).toBeCloseTo(GALLOP_ANGLE_70, 9);
+  });
+
+  it("Codex's case without a sync: after the new connection's answer, still ±63 ms", () => {
+    const window = codexCase();
+    window.applied(answer(12, 1_280, 'gallop', 'angle'));
+    expect(window.windowAt(1_300).cleanMs).toBeCloseTo(GALLOP_ANGLE_70, 9);
+  });
+
+  it("without a sync the new connection's answer orders nothing: a gallop lost with the old connection may still come on top of it — ±63 ms, never the answer's ±126", () => {
+    const window = new ApproachWindow(context70);
+    window.sent(11, { gear: 'gallop' }, 1_000); // the old connection
+    window.connectionLost();
+    window.sent(12, { line: 'angle' }, 1_200);
+    expect(window.windowAt(1_300).cleanMs).toBeCloseTo(GALLOP_ANGLE_70, 9);
+    window.applied(answer(12, 1_280, 'collected', 'angle')); // the gallop had not arrived by then
+    expect(window.windowAt(1_270).cleanMs).toBeCloseTo(GALLOP_70, 9); // before the answer: collected, or the gallop
+    expect(window.windowAt(1_300).cleanMs).toBeCloseTo(GALLOP_ANGLE_70, 9);
+    expect(window.windowAt(60_000).cleanMs).toBeCloseTo(GALLOP_ANGLE_70, 9); // no timeout is proof of anything
+    window.synced({ at: 61_000, requestedGear: 'collected', line: 'angle' }); // the sync's word: the gallop is out
+    expect(window.windowAt(61_000).cleanMs).toBeCloseTo(ANGLE_70, 9);
+    expect(window.windowAt(60_000).cleanMs).toBeCloseTo(GALLOP_ANGLE_70, 9); // before its moment it may have come
+  });
+
+  it('the old connection may go on from any of its commands, not only its first: collected and the angle lost, the new gallop answered on the centre — the angle may still come on the gallop (±63 ms)', () => {
+    const window = new ApproachWindow(context70);
+    window.sent(10, { gear: 'extended' }, 900);
+    window.applied(answer(10, 950, 'extended'));
+    window.sent(11, { gear: 'collected' }, 1_000); // the old connection: the collected may have arrived…
+    window.sent(12, { line: 'angle' }, 1_010); // …and the angle not yet
+    window.connectionLost();
+    window.sent(13, { gear: 'gallop' }, 1_200);
+    window.applied(answer(13, 1_250, 'gallop', 'center'));
+    expect(window.stateAt(1_300)).toMatchObject({ gear: 'gallop', angleSharp: true });
+    expect(window.windowAt(1_300).cleanMs).toBeCloseTo(GALLOP_ANGLE_70, 9);
+  });
+
+  it('a sync settles every earlier connection, whatever their order against each other: before its moment the gallop of one with the angle of the other, from it the sync\'s controls', () => {
+    const window = new ApproachWindow(context70);
+    window.sent(11, { gear: 'gallop' }, 1_000);
+    window.connectionLost();
+    window.sent(12, { line: 'angle' }, 1_100);
+    window.connectionLost();
+    window.synced({ at: 1_300, requestedGear: 'collected', line: 'center' });
+    expect(window.windowAt(1_250).cleanMs).toBeCloseTo(GALLOP_ANGLE_70, 9);
+    expect(window.windowAt(1_300).cleanMs).toBeCloseTo(CLEAN_70, 9);
+  });
+
+  it('negative: one connection keeps its order — gallop confirmed, then collected and the angle in flight: never the gallop with the angle (±78.75 ms, not ±63)', () => {
+    const window = new ApproachWindow(context70);
+    window.sent(10, { gear: 'gallop' }, 900);
+    window.applied(answer(10, 950, 'gallop'));
+    window.sent(11, { gear: 'collected' }, 1_000);
+    window.sent(12, { line: 'angle' }, 1_010);
+    expect(window.windowAt(1_100).cleanMs).toBeCloseTo(GALLOP_70, 9);
+    window.connectionLost(); // both on the old connection: still one order
+    expect(window.windowAt(1_100).cleanMs).toBeCloseTo(GALLOP_70, 9);
+  });
+});
