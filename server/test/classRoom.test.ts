@@ -12,7 +12,7 @@ import { ColyseusTestServer } from '@colyseus/testing';
 import type { CourseSpec } from '@open-jumps/shared';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { SESSION } from '../src/auth/sessions.js';
-import { CLASS_PROTOCOL, LOBBY_ROOM_NAME, LobbyRoom, type ClassTableRowWire, type LobbyState } from '../src/colyseus/LobbyRoom.js';
+import { CLASS_PROTOCOL, LOBBY_ROOM_NAME, LobbyRoom, OPENED_ELSEWHERE_CLOSE_CODE, type ClassTableRowWire, type LobbyState } from '../src/colyseus/LobbyRoom.js';
 import { createUpgradeGuard } from '../src/http/origin.js';
 import { RUN } from '../src/round/courseRunner.js';
 import type { ResultRepository } from '../src/storage/repositories.js';
@@ -1398,5 +1398,82 @@ describe('K1.1 code audit r2: the server tells the rider the controls and the ru
     expect(acks(back)[0]?.at ?? 0).toBeGreaterThanOrEqual(sync?.at ?? Number.POSITIVE_INFINITY);
     await back.client.leave();
     await hostSeat.client.leave();
+  }, 30000);
+});
+
+describe('K1.1 code audit r3, P2 #2: one controlling connection per account', () => {
+  type ControlApplied = { seq: number | null; at: number; requestedGear: string; line: string };
+  type SyncWithControls = ApproachSync & { requestedGear: string; line: string; at: number };
+  const acks = (seat: Seat) => seat.received.filter((m) => m.type === 'control-applied').map((m) => m.payload as ControlApplied);
+  const syncs = (seat: Seat) => seat.received.filter((m) => m.type === 'approach-sync').map((m) => m.payload as SyncWithControls);
+  /** The close code the seat's connection ends with. */
+  const leaveCode = (seat: Seat): Promise<number> => new Promise((resolve) => seat.client.onLeave((code: number) => resolve(code)));
+
+  it('a second window of the account takes control during the heat: the first is closed with 4102 — no leave, no drop: no autopilot, no seat kept, still a participant; gear and line from the second are answered to it alone, the same seq the first used confirms nothing there, and no other account hears any of it', async () => {
+    const { entry, room, riders } = await openRoom(2, LATE_FENCE_COURSE);
+    const [host, friend] = riders as [Rider, Rider];
+    const hostSeat = await sit(room.roomId, entry.code, host.token, host.account.id);
+    const tabA = await sit(room.roomId, entry.code, friend.token, friend.account.id);
+    const aClosed = leaveCode(tabA);
+    await startRiding(hostSeat);
+    tabA.client.send('room', { type: 'gear', gear: 'extended', seq: 1 });
+    await until(() => acks(tabA).length === 1, 2000, "the answer to A's own command");
+    const aToken = tabA.client.reconnectionToken;
+    const tabB = await sit(room.roomId, entry.code, friend.token, friend.account.id); // the same rider, another window
+    expect(await aClosed).toBe(OPENED_ELSEWHERE_CLOSE_CODE);
+    // B has control: the approach in progress and her controls as the server holds them, A's extended among them.
+    await until(() => syncs(tabB).length === 1, 2000, 'the approach-sync on B');
+    expect(syncs(tabB)[0]).toMatchObject({ requestedGear: 'extended', line: 'center' });
+    // B numbers its commands from 1 too — the very seq A used.
+    tabB.client.send('room', { type: 'gear', gear: 'gallop', seq: 1 });
+    tabB.client.send('room', { type: 'line', line: 'angle', seq: 2 });
+    await until(() => acks(tabB).length === 2, 2000, 'both answers on B');
+    expect(acks(tabB).map(({ seq, requestedGear, line }) => ({ seq, requestedGear, line }))).toEqual([
+      { seq: 1, requestedGear: 'gallop', line: 'center' },
+      { seq: 2, requestedGear: 'gallop', line: 'angle' },
+    ]);
+    await until(() => hostSeat.client.state.riders.get(friend.account.id)?.gear === 'gallop', 2000, 'the gallop in force');
+    await sleep(600); // long enough for a drop to have put the horse on autopilot
+    expect(acks(tabA)).toHaveLength(1); // A's own answer only: B's seq 1 never reached the closed window
+    expect(tabA.received.filter((m) => m.type === 'approach-sync')).toEqual([]);
+    expect(acks(hostSeat)).toEqual([]); // nobody else hears her commands
+    expect(syncs(hostSeat)).toEqual([]);
+    expect(hostSeat.client.state.riders.get(friend.account.id)?.autopilot).toBe(false); // the closed window was no drop
+    expect(hostSeat.client.state.participants.has(friend.account.id)).toBe(true); // nor a leave
+    // No seat was kept for A: its token takes nothing back.
+    await expect(sdk(friend.token).reconnect<LobbyState>(aToken)).rejects.toThrow();
+    // B still drives, and the heat ends with her result never on autopilot (whatever the judge made of her passive ride).
+    tabB.client.send('room', { type: 'gear', gear: 'extended', seq: 3 });
+    await until(() => acks(tabB).length === 3, 2000, 'B still drives');
+    await until(() => hostSeat.client.state.phase === 'done', 25000, "phase 'done'");
+    const row = (await services.repos.results.listByAccount(friend.account.id))[0];
+    expect(row).toMatchObject({ autopilot: false });
+    expect(row?.eliminationReason).not.toBe('disconnected'); // the closed window was never taken for a leave
+    await tabB.client.leave();
+    await hostSeat.client.leave();
+  }, 45000);
+
+  it('in the lobby too: the newer window takes control, the older one is closed with 4102 and the account stays a participant; the closed window takes control back by joining again', async () => {
+    const { entry, room, riders } = await openRoom(2);
+    const [host, friend] = riders as [Rider, Rider];
+    const hostSeat = await sit(room.roomId, entry.code, host.token, host.account.id);
+    const tabA = await sit(room.roomId, entry.code, friend.token, friend.account.id);
+    const aClosed = leaveCode(tabA);
+    const tabB = await sit(room.roomId, entry.code, friend.token, friend.account.id);
+    const bClosed = leaveCode(tabB);
+    expect(await aClosed).toBe(OPENED_ELSEWHERE_CLOSE_CODE);
+    await sleep(200);
+    expect(hostSeat.client.state.participants.has(friend.account.id)).toBe(true);
+    expect(services.rooms.getByCode(entry.code)?.admission.canAccessState(friend.account.id)).toBe(true);
+    const tabA2 = await sit(room.roomId, entry.code, friend.token, friend.account.id); // "play in this window"
+    expect(await bClosed).toBe(OPENED_ELSEWHERE_CLOSE_CODE);
+    expect(tabA2.client.state.participants.has(friend.account.id)).toBe(true);
+    // The host's own windows follow the same rule, and her actions work from the newer one.
+    const hostClosed = leaveCode(hostSeat);
+    const hostTab2 = await sit(room.roomId, entry.code, host.token, host.account.id);
+    expect(await hostClosed).toBe(OPENED_ELSEWHERE_CLOSE_CODE);
+    await startRiding(hostTab2);
+    await tabA2.client.leave();
+    await hostTab2.client.leave();
   }, 30000);
 });

@@ -84,11 +84,11 @@ export interface LobbyRoomDeps {
  *   refused ('not-riding'). K1.1 code audit r2 — the server is the client's source of the controls it judges with:
  *   · A 'gear' or 'line' command may carry `seq`, the sender's own number for it (monotonic per page; validated as a
  *     safe integer ≥ 0). Every gear and line command the room applies is answered to the sender — that connection
- *     only — with 'control-applied' { seq, at, requestedGear, line }: seq as sent (null for a command without one, an
- *     older client), `at` the game-clock receive time the command is applied at (the moment from which the judge reads
- *     it: the course runner's change log), and the rider's requested gear and line once it is applied (with every
- *     command received before it). The answer goes at receipt: the command waits in the engine's queue until the tick
- *     of its millisecond, but nothing can come before it any more.
+ *     only, the account's one connection (see below) — with 'control-applied' { seq, at, requestedGear, line }: seq as
+ *     sent (null for a command without one, an older client), `at` the game-clock receive time the command is applied
+ *     at (the moment from which the judge reads it: the course runner's change log), and the rider's requested gear
+ *     and line once it is applied (with every command received before it). The answer goes at receipt: the command
+ *     waits in the engine's queue until the tick of its millisecond, but nothing can come before it any more.
  *   · A refused rider command names its seq when it carried one: 'refused' { error, seq } ('not-riding', or
  *     'not-participant' from the door); without seq the refusal is { error } as before. So the sender knows which of
  *     its commands the server never applied.
@@ -100,6 +100,13 @@ export interface LobbyRoomDeps {
  *   Take-off and turn decisions are broadcast as 'round-event' { riderId, ...event }; the
  *   'approach' event carries speedMps (K1.1 step 5): the approach speed the server froze at the zone entry (m/s, the
  *   runner's Approach.speed) — the rules, windows and judging do not change, the clients only draw from it.
+ * - One controlling connection per account (K1.1 code audit r3): a fresh join or a token reconnection of an account
+ *   takes control in the room, and every other live connection of that account is forgotten (nothing it sends is heard
+ *   any more) and closed with OPENED_ELSEWHERE_CLOSE_CODE (4102) — the game was opened in another window. That close is
+ *   neither a leave nor a drop: no autopilot, no seat kept, the account stays a participant (it plays from the new
+ *   connection). So everything said to one rider ('control-applied', a 'refused' by seq, 'class-rules', 'clock-offset',
+ *   'approach-sync') reaches the one connection that drives her horse, and a window numbering its commands never reads
+ *   another window's answers. The closed window takes control back the same way: by joining again.
  * - A dropped connection during 'riding' keeps the seat for reconnectSeconds (Colyseus allowReconnection) with
  *   the horse on autopilot; a reconnection with the token — or a fresh join by the same account, also after the
  *   reservation expired — hands control back; an expired reservation never withdraws the rider (the horse waits
@@ -179,6 +186,12 @@ export type LobbyRefusal = 'bad-origin' | 'no-session' | 'not-admitted';
 export const KICKED_CLOSE_CODE = 4100;
 /** WebSocket close code a client receives when its account's sessions were revoked (PIN reset, logout). */
 export const SESSION_REVOKED_CLOSE_CODE = 4101;
+/**
+ * WebSocket close code a client receives when a newer connection of its account took control in this room (K1.1 code
+ * audit r3): the game was opened in another window or tab. Not a leave — the rider stays in, her seat is the new
+ * connection's.
+ */
+export const OPENED_ELSEWHERE_CLOSE_CODE = 4102;
 
 // Schemas use the @colyseus/schema 5 builder (schema() + t.*): the legacy defineTypes() path relies on
 // `useDefineForClassFields: false`, and with ES2022 class fields the map never received its child type.
@@ -467,9 +480,11 @@ export class LobbyRoom extends Room<{ state: LobbyState }> {
       throw new Error('no-session: the session was revoked before the connection');
     }
     if (!this.isAdmitted(accountId)) throw new Error('not-admitted: admission was withdrawn before the connection');
-    // A fresh connection supersedes a pending reconnection of the same account.
+    // A fresh connection supersedes a pending reconnection of the same account, and takes control from every live
+    // connection of it (K1.1 code audit r3: one controlling connection per account).
     this.rejectReconnection(accountId);
     this.accountBySession.set(client.sessionId, accountId);
+    this.takeControl(client, accountId);
     if (!this.state.participants.has(accountId)) {
       const profile = this.profiles.get(accountId);
       const participant = new LobbyParticipant();
@@ -495,11 +510,12 @@ export class LobbyRoom extends Room<{ state: LobbyState }> {
 
   override onLeave(client: Client, code?: number): void {
     const accountId = this.accountBySession.get(client.sessionId);
-    // A session already forgotten (revoked, superseded) has nothing left to do here.
+    // A session already forgotten (revoked, superseded by a newer connection of the account) has nothing left to do here.
     if (accountId === undefined) return;
     const othersAlive = [...this.accountBySession].some(([sessionId, id]) => sessionId !== client.sessionId && id === accountId);
     const riding = this.flow?.phase === 'riding' && this.heatRiders.has(accountId);
-    const dropped = code !== CloseCode.CONSENTED && code !== KICKED_CLOSE_CODE && code !== SESSION_REVOKED_CLOSE_CODE;
+    const dropped =
+      code !== CloseCode.CONSENTED && code !== KICKED_CLOSE_CODE && code !== SESSION_REVOKED_CLOSE_CODE && code !== OPENED_ELSEWHERE_CLOSE_CODE;
     if (dropped && riding && !othersAlive && !this.reconnections.has(accountId)) {
       // The account's last connection went to sleep: keep the seat for a while with the horse on autopilot (the
       // account mapping stays until the reservation is consumed, rejected or expires).
@@ -507,8 +523,9 @@ export class LobbyRoom extends Room<{ state: LobbyState }> {
       void this.keepSeat(client, accountId);
       return;
     }
-    // Another live session of the same account keeps control; a drop outside the heat just forgets the session
-    // (presence is read again when a heat starts).
+    // Another live session of the same account keeps control (only for a moment now: a newer connection closes the
+    // older ones at once, K1.1 code audit r3); a drop outside the heat just forgets the session (presence is read
+    // again when a heat starts).
     const gone = this.forgetSession(client.sessionId);
     if (!gone) return;
     if (gone.lastConnection && code === CloseCode.CONSENTED) {
@@ -552,6 +569,7 @@ export class LobbyRoom extends Room<{ state: LobbyState }> {
       const back = await deferred;
       this.reconnections.delete(accountId);
       this.accountBySession.set(client.sessionId, accountId);
+      this.takeControl(back, accountId);
       if (this.heatRiders.has(accountId)) this.flow?.riderReconnected(accountId, this.serverNow());
       // Messages go to the NEW Client object: Colyseus marks the previous one RECONNECTED and drops whatever is sent
       // to it, so the clock series used to vanish here (found with audit K1 r2 #1). The offset in force is told to the
@@ -617,6 +635,22 @@ export class LobbyRoom extends Room<{ state: LobbyState }> {
     if (!pending) return;
     this.reconnections.delete(accountId);
     pending.reject();
+  }
+
+  /**
+   * One controlling connection per account (K1.1 code audit r3): `client` — a fresh join or a token reconnection —
+   * takes control, and every other live connection of the account is forgotten (no message of it is heard any more)
+   * and closed with OPENED_ELSEWHERE_CLOSE_CODE. Forgotten first, so its onLeave does nothing: not a leave, not a drop
+   * — no autopilot, no seat kept, the participant stays (the new connection is hers already). Whatever the closed
+   * connection sent before is applied as usual; what it sends after is never heard, and the answers to the new
+   * connection's commands go to the new connection alone.
+   */
+  private takeControl(client: Client, accountId: string): void {
+    for (const other of [...this.clients]) {
+      if (other.sessionId === client.sessionId || this.accountBySession.get(other.sessionId) !== accountId) continue;
+      this.forgetSession(other.sessionId);
+      other.leave(OPENED_ELSEWHERE_CLOSE_CODE);
+    }
   }
 
   // ---------------------------------------------------------------------------------------------------------
