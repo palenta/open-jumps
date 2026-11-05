@@ -73,9 +73,11 @@ export const es: Record<keyof typeof en, string> = {
   'lobby.retry': 'Volver a intentar',
   'lobby.ended.kicked': 'Te han pedido salir de esta sala',
   'lobby.ended.revoked': 'Has salido de la cuenta en este dispositivo',
+  'lobby.ended.elsewhere': 'La partida está abierta en otra ventana',
   'lobby.ended.lost': 'Se perdió la conexión — toca para volver',
   'lobby.ended.left': 'Has salido de la sala',
   'lobby.reconnect': 'Volver a conectar',
+  'lobby.playHere': 'Jugar en esta ventana',
   'lobby.backHome': 'Volver al inicio',
 
   'walk.title': '{term:reconocimiento}',

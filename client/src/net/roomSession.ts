@@ -6,7 +6,7 @@
 // visibilitychange / pageshow.
 import { HEIGHT_CLASSES, type CourseSpec, type Gear, type HeightClass, type RoundMode } from '@open-jumps/shared';
 import type { ClientClock } from './clientClock.js';
-import { KICKED_CLOSE_CODE, SESSION_REVOKED_CLOSE_CODE, type ClientRoomMessage, type ControlState, type Line, type LobbyStateSnapshot, type ServerMessage } from './types.js';
+import { KICKED_CLOSE_CODE, OPENED_ELSEWHERE_CLOSE_CODE, SESSION_REVOKED_CLOSE_CODE, type ClientRoomMessage, type ControlState, type Line, type LobbyStateSnapshot, type ServerMessage } from './types.js';
 
 /** The SDK's retry settings the session may override (tests shorten them; production keeps the SDK's defaults). */
 export interface RetrySettings {
@@ -44,7 +44,7 @@ export interface SdkLike {
 export type SessionStatus = 'idle' | 'connecting' | 'connected' | 'dropped' | 'ended';
 
 /** Why a session is over for good: kicked (4100), signed out elsewhere (4101), left on purpose, or lost (no way back). */
-export type SessionEnd = { kind: 'kicked' | 'revoked' | 'left' | 'lost'; code: number };
+export type SessionEnd = { kind: 'kicked' | 'revoked' | 'elsewhere' | 'left' | 'lost'; code: number };
 
 export interface RoomSessionDeps {
   sdk: SdkLike;
@@ -72,7 +72,9 @@ const FIRST_STATE_TIMEOUT_MS = 5000;
  *   sent when it is a finite number above 0, and as null otherwise — missing, not a number, NaN, ±Infinity, 0 or
  *   negative: an approach without speed (the game then draws the marker as an outline and the own horse from the
  *   patch). An invalid speed never drops the message: the approach itself still arms the tap.
- * - A leave code 4100 → ended 'kicked', 4101 → 'revoked', a consented leave → 'left'. Any other close: with the
+ * - A leave code 4100 → ended 'kicked', 4101 → 'revoked', 4102 → 'elsewhere' (a newer connection of the account took
+ *   control: the game is open in another window — K1.1 code audit r3; never retried, whatever the retry setting), a
+ *   consented leave → 'left'. Any other close: with the
  *   SDK's retries ON, the SDK's onDrop makes the status 'dropped' and the SDK retries by itself — a successful
  *   retry → 'connected', and the final onLeave once the retries are exhausted (or refused at once: uptime too
  *   short, a server close the SDK never retries) ends the session as 'lost' (audit K1 r1 #4: never a 'dropped'
@@ -256,6 +258,7 @@ export class RoomSession {
       if (this.room !== room || this.currentStatus === 'ended') return;
       if (code === KICKED_CLOSE_CODE) this.finish({ kind: 'kicked', code });
       else if (code === SESSION_REVOKED_CLOSE_CODE) this.finish({ kind: 'revoked', code });
+      else if (code === OPENED_ELSEWHERE_CLOSE_CODE) this.finish({ kind: 'elsewhere', code });
       else if (this.leaving) this.finish({ kind: 'left', code });
       // With the SDK's retries on, onLeave is final: the retries are exhausted (FAILED_TO_RECONNECT), or the SDK
       // never started them (uptime too short, a server close it does not retry) — nothing in this session will

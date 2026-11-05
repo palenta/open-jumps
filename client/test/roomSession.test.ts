@@ -6,7 +6,8 @@ import { matchMaker } from 'colyseus';
 import type { LobbyState } from '../../server/src/colyseus/LobbyRoom.js';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { RoomSession, type RoomLike, type SdkLike, type SessionStatus } from '../src/net/roomSession.js';
-import { KICKED_CLOSE_CODE, type RoundEventWire, type ServerMessage } from '../src/net/types.js';
+import { ClientClock } from '../src/net/clientClock.js';
+import { KICKED_CLOSE_CODE, OPENED_ELSEWHERE_CLOSE_CODE, type RoundEventWire, type ServerMessage } from '../src/net/types.js';
 import { bootApp, LIVE_COURSE, newDevice, sleep, TIMING, until, type Device, type LiveApp } from './helpers.js';
 
 /** Long enough after the last ping of a series for its pong (held 40 ms) and the server's answer to land. */
@@ -294,6 +295,32 @@ describe('RoomSession', () => {
     expect(await seat.session.resume()).toBe(false);
     expect(seat.session.status).toBe('ended');
     expect(seat.session.end?.kind).toBe('lost');
+  }, 25000);
+
+  it("two windows of one rider while riding (K1.1 code audit r3): the newer takes control — the older ends as 'elsewhere' (4102), can send nothing and hears nothing more; the newer's commands, numbered from 1 again, are answered to it alone, and the horse never goes on autopilot", async () => {
+    const { host, seat: tabA, roomId, code } = await ridingAlone(true);
+    expect(tabA.session.send({ type: 'gear', gear: 'extended' }, 1)).toBe(true);
+    await until(() => tabA.messages.some((m) => m.type === 'control-applied'), 3000, "the answer to A's command");
+    // The same rider (the same cookie) opens the game in another window, with its own clock.
+    const tabB = await sit({ ...host, clock: new ClientClock(() => Date.now()) }, roomId, code, true);
+    await until(() => tabA.session.status === 'ended', 3000, 'the older window to end');
+    expect(tabA.session.end).toEqual({ kind: 'elsewhere', code: OPENED_ELSEWHERE_CLOSE_CODE });
+    expect(tabA.statuses.at(-1)).toBe('ended');
+    expect(tabA.statuses).not.toContain('dropped'); // never a drop: nothing to resume
+    expect(tabA.session.send({ type: 'gear', gear: 'gallop' }, 2)).toBe(false);
+    const heardByA = tabA.messages.length;
+    await until(() => tabB.messages.some((m) => m.type === 'approach-sync'), 3000, 'control handed to B');
+    expect(tabB.session.send({ type: 'gear', gear: 'gallop' }, 1)).toBe(true);
+    expect(tabB.session.send({ type: 'line', line: 'angle' }, 2)).toBe(true);
+    await until(() => tabB.messages.filter((m) => m.type === 'control-applied').length === 2, 3000, 'both answers on B');
+    expect(tabB.messages.filter((m) => m.type === 'control-applied')).toEqual([
+      expect.objectContaining({ seq: 1, requestedGear: 'gallop', line: 'center' }),
+      expect.objectContaining({ seq: 2, requestedGear: 'gallop', line: 'angle' }),
+    ]);
+    await sleep(300);
+    expect(tabA.messages).toHaveLength(heardByA); // B's answers — seq 1 and 2, A's own numbers — never reach A
+    expect(autopilotOnServer(roomId, host.profile.id)).toBe(false);
+    await tabB.session.leave();
   }, 25000);
 });
 

@@ -170,6 +170,18 @@ describe('RoomSession with the SDK retrying by itself (autoReconnect on, audit K
     expect(revoked.session.end).toEqual({ kind: 'revoked', code: 4101 });
   });
 
+  it("a close 4102 — the game opened in another window (K1.1 code audit r3) — ends as 'elsewhere' whatever the retry setting: never a drop to resume, and nothing more is sent", async () => {
+    for (const autoReconnect of [true, false]) {
+      const { room, session, statuses } = await connected(autoReconnect);
+      room.finish(4102);
+      expect(session.status).toBe('ended');
+      expect(session.end).toEqual({ kind: 'elsewhere', code: 4102 });
+      expect(statuses).toEqual(['connecting', 'connected', 'ended']);
+      expect(await session.resume()).toBe(false);
+      expect(session.send({ type: 'gear', gear: 'gallop' }, 1)).toBe(false);
+    }
+  });
+
   it('a retry that succeeds → connected again, with the status told once', async () => {
     const { room, session, statuses } = await connected(true);
     room.drop(1001);

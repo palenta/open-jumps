@@ -72,9 +72,11 @@ export const en = {
   'lobby.retry': 'Try again',
   'lobby.ended.kicked': 'You were asked to leave this room',
   'lobby.ended.revoked': 'You were signed out on this device',
+  'lobby.ended.elsewhere': 'The game is open in another window',
   'lobby.ended.lost': 'Connection lost — tap to reconnect',
   'lobby.ended.left': 'You left the room',
   'lobby.reconnect': 'Reconnect',
+  'lobby.playHere': 'Play in this window',
   'lobby.backHome': 'Back to the start',
 
   'walk.title': '{term:reconocimiento}',

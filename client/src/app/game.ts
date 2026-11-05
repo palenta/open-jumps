@@ -278,9 +278,12 @@ interface RoundModules {
  *   is undone at once, so the select and the checkboxes show what the server was told (K1.1 code audit r2); the class
  *   is judged with the rules the server froze ('class-rules'), never with these; [data-action="start-class"] (host
  *   only) sends start-class with select[data-order]; [data-action="leave"] leaves to home.
- * - ended: shown the moment the session is over for good (kicked, revoked, lost), whatever phase the last state
- *   named — never a frozen walk or round (audit K1 r1 #5): translate('lobby.ended.<kind>') in [data-ended]; for
- *   'lost' a [data-action="reconnect"] button asks the room status and connects a new session; [data-action="leave"]
+ * - ended: shown the moment the session is over for good (kicked, revoked, opened elsewhere, lost), whatever phase the
+ *   last state named — never a frozen walk or round (audit K1 r1 #5), so no take-off window is promised any more:
+ *   translate('lobby.ended.<kind>') in [data-ended]; for 'lost' a [data-action="reconnect"] button
+ *   (translate('lobby.reconnect')) asks the room status and connects a new session; for 'elsewhere' (K1.1 code audit
+ *   r3: a newer connection of the account took control — the game is open in another window) the same button, labelled
+ *   translate('lobby.playHere'), connects a new session that takes control back; [data-action="leave"]
  *   goes home. The arena takes no input on this screen.
  * - walk: [data-list="fences"] > li (walkModel texts), [data-focus] the focused fence number, the scene mounted in
  *   [data-arena] with the course. The fly-over paces itself over the window the server announces in the
@@ -1231,7 +1234,10 @@ export function createGame(deps: GameDeps): Game {
   function renderEnded(): string {
     if (!sessionEnd) return '';
     const message = translateKey(locale, `lobby.ended.${sessionEnd.kind}`);
-    const reconnect = sessionEnd.kind === 'lost' ? `<button type="button" data-action="reconnect" class="primary">${escapeHtml(t('lobby.reconnect'))}</button>` : '';
+    // A lost connection reconnects; a game opened in another window is played here again the same way: a fresh join
+    // takes control back (K1.1 code audit r3), and the other window ends as this one did.
+    const label = sessionEnd.kind === 'lost' ? t('lobby.reconnect') : sessionEnd.kind === 'elsewhere' ? t('lobby.playHere') : null;
+    const reconnect = label === null ? '' : `<button type="button" data-action="reconnect" class="primary">${escapeHtml(label)}</button>`;
     return `<section class="screen ended">
       <h1>${escapeHtml(t('lobby.title', { code: roomCode }))}</h1>
       <p data-ended class="ended">${escapeHtml(message)}</p>

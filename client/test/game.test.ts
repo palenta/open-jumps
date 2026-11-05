@@ -2337,6 +2337,43 @@ describe('the tab lifecycle', () => {
     expect(h.game.session).toBeNull();
   });
 
+  it("the game opened in another window while riding (K1.1 code audit r3): the ended screen says so in the locale, with a button to play in this window; the take-off window is promised no more — no marker, no hint, the controls dead; the button asks the room status and a new session takes control back", async () => {
+    const h = await hostInLobby({ roomStatus: [ok<RoomStatusReply>({ status: 'host', roomId: 'r1' })] });
+    startClass(h);
+    await settle();
+    const t0 = h.clock.now() + 1_000;
+    approachOwn(h, 1, 1, t0, 5);
+    h.game.frame(h.clock.now());
+    expect(h.scene.frames.at(-1)?.takeoff?.cleanHalfM ?? null).not.toBeNull(); // the band of her approach, before
+    h.session().endWith({ kind: 'elsewhere', code: 4102 });
+    await settle();
+    expect(h.root.dataset.screen).toBe('ended');
+    expect(text(h.root.querySelector('[data-ended]'))).toBe('The game is open in another window');
+    expect(text(h.root.querySelector('[data-action="reconnect"]'))).toBe('Play in this window');
+    expect(h.root.querySelector('[data-action="leave"]')).not.toBeNull();
+    expect(h.root.querySelector('[data-arena]')).toBeNull();
+    for (const now of [h.clock.now(), t0 - 50, t0, t0 + 50]) {
+      h.game.frame(now);
+      expect(h.scene.frames.at(-1)).toMatchObject({ phase: 'idle', takeoff: null });
+    }
+    h.clock.t = t0;
+    pressPage(h, TAP);
+    pressPage(h, GEAR);
+    expect(h.session().sent).toEqual([]);
+    expect(h.root.querySelector('[data-hud-caption]')).toBeNull();
+    click(h.root, '[data-action="locale"][data-locale="es"]');
+    expect(text(h.root.querySelector('[data-ended]'))).toBe('La partida está abierta en otra ventana');
+    expect(text(h.root.querySelector('[data-action="reconnect"]'))).toBe('Jugar en esta ventana');
+    h.settings.stateOnConnect = ridingState();
+    click(h.root, '[data-action="reconnect"]');
+    await settle();
+    expect(h.api.callsOf('roomStatus')).toEqual([['ABCDEF']]);
+    expect(h.sessions).toHaveLength(2);
+    expect(h.game.session).toBe(h.sessions[1]);
+    expect(h.sessions[1]?.connects).toEqual([['r1', 'ABCDEF']]); // a fresh join: the server hands control to it
+    expect(h.root.dataset.screen).toBe('round');
+  });
+
   it('destroy() removes the window listeners, leaves the session and disposes the scene', async () => {
     const h = await hostInLobby();
     const game = h.game;

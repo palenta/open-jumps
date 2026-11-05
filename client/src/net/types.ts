@@ -247,3 +247,8 @@ export interface ControlState {
 /** WebSocket close codes the server uses (LobbyRoom). */
 export const KICKED_CLOSE_CODE = 4100;
 export const SESSION_REVOKED_CLOSE_CODE = 4101;
+/**
+ * A newer connection of the same account took control in the room (K1.1 code audit r3: one controlling connection per
+ * account): the game was opened in another window. Not a leave — the rider is still in, played from that window.
+ */
+export const OPENED_ELSEWHERE_CLOSE_CODE = 4102;
